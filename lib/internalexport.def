@@ -40,7 +40,10 @@ EXPORTS
     ktxTexture1_calcLevelOffset
     ktxTexture1_destruct
     ktxTexture1_glTypeSize
+    ktxTexture2_WriteToMemory
+    ktxTexture2_WriteToNamedFile
     ktxTexture2_GetImageOffset
+    ktxTexture2_GetImageSize
     ktxTexture2_calcLevelOffset
     ktxTexture2_destruct
     reconstructDFDBytesPlane0FromSamples
