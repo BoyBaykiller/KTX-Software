@@ -897,8 +897,9 @@ Compare two KTX2 files.
             The default mode is @b none, meaning that all DFD entries will be compared.
         </dd>
         <dt>\--ignore-bdfd-bytesplane</dt>
-        <dd>Ignore BDFD bytesPlane values. Useful when comparing supercompressed files with
-            non-supercompressed ones, as bytesPlane is set to zero for supercompressed files.</dd>
+        <dd>Ignore BDFD bytesPlane values. Useful when comparing pre-spec-2.0.4 supercompressed
+            files with 2.0.4+ supercompressed or non-supercompressed ones, as bytesPlane is set to
+            zero in older supercompressed files.</dd>
         <dt>\--ignore-metadata all | &lt;key&gt;[,...] | none</dt>
         <dd>Controls the comparison of metadata (KVD) entries. Possible options are: <br />
             @b all - Ignore all metadata entries. <br />
@@ -1056,8 +1057,9 @@ class CommandCompare : public Command {
                         "  none: Do not ignore any DFD blocks\n",
                         cxxopts::value<std::string>()->default_value("none"),
                         "all|all-except-color-space|unknown|extended|none")
-                    (kIgnoreBDFDBytesPlane, "Ignore BDFD bytesPlane values. Useful when comparing supercompressed "
-                        "files with non-supercompressed ones, as bytesPlane is set to zero for supercompressed files.")
+                    (kIgnoreBDFDBytesPlane, "Ignore BDFD bytesPlane values. Useful when comparing pre-spec-2.0.4 "
+                        "supercompressed files with 2.0.4+ supercompressed or non-supercompressed ones, as bytesPlane "
+                        "is set to zero in older supercompressed files.")
                     (kIgnoreMetadata, "Controls the comparison of metadata (KVD) entries. Possible options are:\n"
                         "  all: Ignore all metadata entries\n"
                         "  <key>[,...]: Ignore the specified comma separated list of metadata keys\n"
@@ -1843,6 +1845,10 @@ void CommandCompare::compareKVD(PrintDiff& diff, InputStreams& streams) {
 struct KVEntry {
     char* value;
     ktx_uint32_t valueLen;
+
+    // shut up clang's complaints about derived classes
+    // that have virtual functions but non-virtual destructor
+    virtual ~KVEntry() {}
 
     template <typename T>
     static std::optional<T> load(ktxHashListEntry* entry) {

@@ -39,8 +39,6 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME ktx
         PDB_NAME ktxtools # Avoid conflict with libktx's .pdb.
-        CXX_STANDARD 17
-        CXX_STANDARD_REQUIRED YES
 )
 
 target_include_directories(
@@ -76,6 +74,25 @@ target_compile_definitions(
 PRIVATE
     $<TARGET_PROPERTY:ktx,INTERFACE_COMPILE_DEFINITIONS>
 )
+
+target_compile_features(
+    ktxtools
+PUBLIC
+    cxx_std_17
+)
+
+if (KTX_DEVELOPER_FEATURE_PATCH)
+    target_sources(
+        ktxtools
+    PRIVATE
+        command_patch.cpp
+    )
+    target_compile_definitions(
+        ktxtools
+    PRIVATE
+        KTX_DEVELOPER_FEATURE_PATCH=1
+    )
+endif()
 
 set_tool_properties(ktxtools)
 set_code_sign(ktxtools)

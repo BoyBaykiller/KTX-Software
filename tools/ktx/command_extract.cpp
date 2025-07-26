@@ -23,8 +23,8 @@
 #include <fmt/ostream.h>
 #include <fmt/printf.h>
 
-#include "png.imageio/lodepng.h"
-#include "astc-encoder/Source/tinyexr.h"
+#include "lodepng/lodepng.h"
+#include "astc-encoder/Source/ThirdParty/tinyexr.h"
 #include "astc-encoder/Source/astcenc.h"
 
 // -------------------------------------------------------------------------------------------------

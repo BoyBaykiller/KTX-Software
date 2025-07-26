@@ -3,7 +3,7 @@
 
 /**
  * @internal
- * @file writer.c
+ * @file
  * @~English
  *
  * @brief Functions for creating KTX-format files from a set of images.
@@ -133,6 +133,13 @@ appendLibId(ktxHashList* head, ktxHashListEntry* writerEntry)
     }
 
     // strnstr needed because KTXwriter values may not be NUL terminated.
+#if defined(EMPTY_LIBVER_WITH_UNIDENTIFIED_APP)
+    // May be needed for patching some CTS files without changing their KTXwriter
+    // metadata. Keep in case useful again.
+    if (strnstr(id, "Unidentified app", idLen) != NULL) {
+        libVer = "";
+    } else
+#endif
     if (strnstr(id, "__default__", idLen) != NULL) {
         libVer = STR(LIBKTX_DEFAULT_VERSION);
     } else {
@@ -148,9 +155,11 @@ appendLibId(ktxHashList* head, ktxHashListEntry* writerEntry)
     strncpy(&libId[sizeof(libIdIntro)-1], libVer,
             libIdLen-(sizeof(libIdIntro)-1));
 
+    char* fullId = NULL;
     if (strnstr(id, libId, idLen) != NULL) {
         // This lib id is already in the writer value.
-        return KTX_SUCCESS;
+        result = KTX_SUCCESS;
+        goto cleanup;
     }
 
     const char* libVerPos = strnstr(id, libIdIntro, idLen);
@@ -162,11 +171,15 @@ appendLibId(ktxHashList* head, ktxHashListEntry* writerEntry)
     }
 
     size_t fullIdLen = idLen + strlen(libId) + 1;
-    if (fullIdLen > UINT_MAX)
-        return KTX_INVALID_OPERATION;
-    char* fullId = malloc(fullIdLen);
-    if (!fullId)
-        return KTX_OUT_OF_MEMORY;
+    if (fullIdLen > UINT_MAX) {
+        result = KTX_INVALID_OPERATION;
+        goto cleanup;
+    }
+    fullId = malloc(fullIdLen);
+    if (!fullId) {
+        result = KTX_OUT_OF_MEMORY;
+        goto cleanup;
+    }
     strncpy(fullId, id, idLen);
     strncpy(&fullId[idLen], libId, libIdLen);
     assert(fullId[fullIdLen-1] == '\0');
@@ -174,6 +187,7 @@ appendLibId(ktxHashList* head, ktxHashListEntry* writerEntry)
     ktxHashList_DeleteEntry(head, writerEntry);
     result = ktxHashList_AddKVPair(head, KTX_WRITER_KEY,
                                    (ktx_uint32_t)fullIdLen, fullId);
+cleanup:
     free(libId);
     free(fullId);
     return result;
@@ -298,6 +312,9 @@ ktxTexture2_SetImageFromStdioStream(ktxTexture2* This, ktx_uint32_t level,
  *
  * Level, layer, faceSlice rather than offset are specified to enable some
  * validation.
+ *
+ * @note The caller is responsible for freeing the original image memory
+ *       referred to by @p src.
  *
  * @param[in] This      pointer to the target ktxTexture object.
  * @param[in] level     mip level of the image to set.
@@ -880,9 +897,6 @@ ktxTexture2_DeflateZstd(ktxTexture2* This, ktx_uint32_t compressionLevel)
     This->dataSize = byteLengthCmp;
     This->supercompressionScheme = KTX_SS_ZSTD;
     This->_private->_requiredLevelAlignment = 1;
-    // Clear bytesPlane to indicate we're now unsized.
-    uint32_t* bdb = This->pDfd + 1;
-    bdb[KHR_DF_WORD_BYTESPLANE0] = 0; /* bytesPlane3..0 = 0 */
 
     return KTX_SUCCESS;
 
@@ -969,9 +983,6 @@ ktxTexture2_DeflateZLIB(ktxTexture2* This, ktx_uint32_t compressionLevel)
     This->dataSize = byteLengthCmp;
     This->supercompressionScheme = KTX_SS_ZLIB;
     This->_private->_requiredLevelAlignment = 1;
-    // Clear bytesPlane to indicate we're now unsized.
-    uint32_t* bdb = This->pDfd + 1;
-    bdb[KHR_DF_WORD_BYTESPLANE0] = 0; /* bytesPlane3..0 = 0 */
 
     return KTX_SUCCESS;
 }

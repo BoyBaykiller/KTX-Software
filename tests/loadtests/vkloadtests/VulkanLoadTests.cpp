@@ -20,8 +20,8 @@
 
 #define _USE_MATH_DEFINES
 #include <math.h>
-
-#include <SDL2/SDL_vulkan.h>
+#include <string>
+#include <regex>
 
 #include "VulkanLoadTests.h"
 #include "Texture.h"
@@ -323,7 +323,7 @@ VulkanLoadTests::onFPSUpdate()
 }
 
 VulkanLoadTestSample*
-VulkanLoadTests::showFile(std::string& filename)
+VulkanLoadTests::showFile(const std::string& filename)
 {
     KTX_error_code ktxresult;
     ktxTexture* kTexture;
@@ -357,7 +357,9 @@ VulkanLoadTests::showFile(std::string& filename)
         createViewer = Texture::create;
     }
     ktxTexture_Destroy(kTexture);
-    std::string args = "--external " + filename;
+
+    // Escape any spaces in filename.
+    std::string args = "--external " + std::regex_replace( filename, std::regex(" "), "\\ " );
     pViewer = createViewer(vkctx, w_width, w_height, args.c_str(), sBasePath);
     return pViewer;
 }

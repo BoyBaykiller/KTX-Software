@@ -14,6 +14,7 @@
 #include "utility.h"
 #include <filesystem>
 #include <iostream>
+#include <regex>
 #include <sstream>
 #include <cxxopts.hpp>
 #include <fmt/ostream.h>
@@ -22,18 +23,30 @@
 #include "image.hpp"
 #include "imageio.h"
 
+/** @file
+ * @~English
+ * @brief @b create command implementation.
+ */
 
 // -------------------------------------------------------------------------------------------------
 
 namespace ktx {
 
+struct SrcColorSpaceInfo {
+    khr_df_transfer_e usedTransferFunction;
+    khr_df_primaries_e usedPrimaries;
+    std::unique_ptr<const TransferFunction> transferFunction{};
+    std::unique_ptr<const ColorPrimaries> colorPrimaries{};
+};
+
+struct DstColorSpaceInfo {
+    std::unique_ptr<const TransferFunction> transferFunction{};
+    std::unique_ptr<const ColorPrimaries> colorPrimaries{};
+};
+
 struct ColorSpaceInfo {
-    khr_df_transfer_e usedInputTransferFunction;
-    khr_df_primaries_e usedInputPrimaries;
-    std::unique_ptr<const TransferFunction> srcTransferFunction{};
-    std::unique_ptr<const TransferFunction> dstTransferFunction{};
-    std::unique_ptr<const ColorPrimaries> srcColorPrimaries{};
-    std::unique_ptr<const ColorPrimaries> dstColorPrimaries{};
+    SrcColorSpaceInfo src;
+    DstColorSpaceInfo dst;
 };
 
 // -------------------------------------------------------------------------------------------------
@@ -51,17 +64,26 @@ struct OptionsCreate {
     inline static const char* kRuntimeMipmap = "runtime-mipmap";
     inline static const char* kGenerateMipmap = "generate-mipmap";
     inline static const char* kEncode = "encode";
+    inline static const char* kNormalize = "normalize";
     inline static const char* kSwizzle = "swizzle";
     inline static const char* kInputSwizzle = "input-swizzle";
     inline static const char* kAssignOetf = "assign-oetf";
+    inline static const char* kAssignTf = "assign-tf";
     inline static const char* kAssignPrimaries = "assign-primaries";
+    inline static const char* kAssignTexcoordOrigin = "assign-texcoord-origin";
     inline static const char* kConvertOetf = "convert-oetf";
+    inline static const char* kConvertTf = "convert-tf";
     inline static const char* kConvertPrimaries = "convert-primaries";
+    inline static const char* kConvertTexcoordOrigin = "convert-texcoord-origin";
     inline static const char* kFailOnColorConversions = "fail-on-color-conversions";
     inline static const char* kWarnOnColorConversions = "warn-on-color-conversions";
+    inline static const char* kNoWarnOnColorConversions = "no-warn-on-color-conversions";
+    inline static const char* kFailOnOriginChanges = "fail-on-origin-changes";
+    inline static const char* kWarnOnOriginChanges = "warn-on-origin-changes";
     inline static const char* kMipmapFilter = "mipmap-filter";
     inline static const char* kMipmapFilterScale = "mipmap-filter-scale";
     inline static const char* kMipmapWrap = "mipmap-wrap";
+    inline static const char* kScale = "scale";
 
     bool _1d = false;
     bool cubemap = false;
@@ -87,12 +109,20 @@ struct OptionsCreate {
     std::optional<std::string> swizzle; /// Sets KTXswizzle
     std::optional<std::string> swizzleInput; /// Used to swizzle the input image data
 
-    std::optional<khr_df_transfer_e> convertOETF = {};
-    std::optional<khr_df_transfer_e> assignOETF = {};
+    std::optional<float> imageScale;
+
+    std::optional<khr_df_transfer_e> convertTF = {};
+    std::optional<khr_df_transfer_e> assignTF = {};
     std::optional<khr_df_primaries_e> assignPrimaries = {};
     std::optional<khr_df_primaries_e> convertPrimaries = {};
+    std::optional<ImageSpec::Origin> assignTexcoordOrigin;
+    std::optional<ImageSpec::Origin> convertTexcoordOrigin;
     bool failOnColorConversions = false;
     bool warnOnColorConversions = false;
+    bool noWarnOnColorConversions = false;
+    bool failOnOriginChanges = false;
+    bool warnOnOriginChanges = false;
+    bool normalize = false;
 
     void init(cxxopts::Options& opts) {
         opts.add_options()
@@ -116,8 +146,16 @@ struct OptionsCreate {
                 (k1D, "Create a 1D texture. If not set the texture will be a 2D or 3D texture.")
                 (kCubemap, "Create a cubemap texture. If not set the texture will be a 2D or 3D texture.")
                 (kRaw, "Create from raw image data.")
-                (kWidth, "Base level width in pixels.", cxxopts::value<uint32_t>(), "[0-9]+")
-                (kHeight, "Base level height in pixels.", cxxopts::value<uint32_t>(), "[0-9]+")
+                (kWidth, "Base level width in pixels. Required with --raw. For non-raw, if not set,"
+                    " the image width is used otherwise the image is resampled to this width and"
+                    " any provided mip levels are resampled proportionately. For non-raw it enables"
+                    " use of the \'Generate Mipmap\' options to tune the resampler.",
+                    cxxopts::value<uint32_t>(), "[0-9]+")
+                (kHeight, "Base level height in pixels. Required with --raw. For non-raw, if not"
+                    " set, the image height is used otherwise the image is resampled to this height"
+                    " and any provided mip levels are resampled proportionately. For non-raw it"
+                    " enables use of the \'Generate Mipmap\' options to tune the resampler.",
+                    cxxopts::value<uint32_t>(), "[0-9]+")
                 (kDepth, "Base level depth in pixels. If set the texture will be a 3D texture.", cxxopts::value<uint32_t>(), "[0-9]+")
                 (kLayers, "Number of layers. If set the texture will be an array texture.", cxxopts::value<uint32_t>(), "[0-9]+")
                 (kLevels, "Number of mip levels.", cxxopts::value<uint32_t>(), "[0-9]+")
@@ -126,65 +164,179 @@ struct OptionsCreate {
                     " It enables the use of \'Generate Mipmap\' options."
                     " If the --levels is not specified the maximum possible mip level will be generated."
                     " This option is mutually exclusive with --runtime-mipmap and cannot be used with UINT or 3D textures.")
+                (kScale, "Scale images as they are loaded. Cannot be used with --raw. It enables use of"
+                    " the \'Generate Mipmap\' options to tune the resampler.",
+                    cxxopts::value<float>(), "<float>")
                 (kEncode, "Encode the created KTX file. Case insensitive."
                     "\nPossible options are: basis-lz | uastc", cxxopts::value<std::string>(), "<codec>")
+                (kNormalize, "Normalize input normals to have a unit length. Only valid for\n"
+                    "linear normal textures with 2 or more components. For 2-component\n"
+                    "inputs 2D unit normals are calculated. Do not use these 2D unit\n"
+                    "normals to generate X+Y normals with --normal-mode. For 4-component\n"
+                    "inputs a 3D unit normal is calculated. 1.0 is used for the value of\n"
+                    "the 4th component. Cannot be used with --raw.")
                 (kSwizzle, "KTX swizzle metadata.", cxxopts::value<std::string>(), "[rgba01]{4}")
                 (kInputSwizzle, "Pre-swizzle input channels.", cxxopts::value<std::string>(), "[rgba01]{4}")
-                (kAssignOetf, "Force the created texture to have the specified transfer function, ignoring"
-                    " the transfer function of the input file(s). Case insensitive."
-                    "\nPossible options are: linear | srgb", cxxopts::value<std::string>(), "<oetf>")
+                (kAssignTf, "Force the created texture to have the specified transfer function, ignoring"
+                    " the transfer function of the input file(s). Possible options match the khr_df_transfer_e"
+                    " enumerators without the KHR_DF_TRANSFER_ prefix. The KHR_DF_TRANSFER_ prefix is ignored"
+                    " if present. Case insensitive."
+                    "\nThe options are:"
+                    " linear | srgb | srgb_eotf | scrgb | scrgb_eotf | itu | itu_oetf | bt601 | bt601_oetf | bt709 | bt709_oetf |"
+                    " bt2020 | bt2020_oetf | smpte170m | smpte170m_oetf | smpte170m_eotf | ntsc | ntsc_eotf | slog | slog_oetf |"
+                    " slog2 | slog2_oetf | bt1886 | bt1886_eotf | hlg_oetf | hlg_eotf | pq_oetf | pg_eotf | dcip3 | dcip3_eotf |"
+                    " pal_oetf | pal625_eotf | st240 | st240_oetf | st240_eotf | acescc | acescc_oetf | acescct | acescct_oetf |"
+                    " abobergb | adobergb_eotf",
+                    cxxopts::value<std::string>(), "<tf>")
+                (kAssignOetf, "Same as --assign-tf. Deprecated.", cxxopts::value<std::string>(), "<tf>")
                 (kAssignPrimaries, "Force the created texture to have the specified color primaries, ignoring"
-                    " the color primaries of the input file(s). Case insensitive."
-                    "\nPossible options are:"
-                    " none | bt709 | srgb | bt601-ebu | bt601-smpte | bt2020 | ciexyz | aces | acescc | ntsc1953 | pal525 | displayp3 | adobergb.",
+                    " the color primaries of the input file(s). Possible options match the khr_df_primaries_e"
+                    " enumerators without the KHR_DF_PRIMARIES_ prefix. The KHR_DF_PRIMARIES_ prefix is ignored"
+                    " if present. Case insensitive."
+                    "\nThe options are:"
+                    " none | bt709 | srgb | bt601_ebu | bt601_smpte | bt2020 | ciexyz | aces | acescc | ntsc1953 | pal525 | displayp3 | adobergb.",
                     cxxopts::value<std::string>(), "<primaries>")
-                (kConvertOetf, "Convert the input image(s) to the specified transfer function, if different"
-                    " from the transfer function of the input file(s). If both this and --assign-oetf are specified,"
+                (kAssignTexcoordOrigin, "Force the created texture to indicate that the texture coordinate"
+                    " origin s=0, t=0 is at the specified corner of the image. Case insensitive."
+                    "\nPossible options are top-left | bottom-left. -front | -back can be appended and"
+                    " one of these is required when --depth is specified. Must be top-left if --cubemap"
+                    " is specified."
+                    "\nAbsent --convert-texcoord-origin, the effect of this option is to cause KTXorientation"
+                    " metadata indicating the specified origin to be written to the output file.",
+                    cxxopts::value<std::string>(), "<origin>")
+                (kConvertTf, "Convert the input image(s) to the specified transfer function, if different"
+                    " from the transfer function of the input file(s). If both this and --assign-tf are specified,"
                     " conversion will be performed from the assigned transfer function to the transfer function"
                     " specified by this option, if different. Case insensitive."
-                    "\nPossible options are: linear | srgb", cxxopts::value<std::string>(), "<oetf>")
+                    "\nPossible options are: linear | srgb. The following srgb aliases are also supported:"
+                    " srgb_eotf | scrgb | scrgb_eotf",
+                    cxxopts::value<std::string>(), "<tf>")
+                (kConvertOetf, "Same as --convert-tf. Deprecated.", cxxopts::value<std::string>(), "<tf>")
                 (kConvertPrimaries, "Convert the image image(s) to the specified color primaries, if different"
                     " from the color primaries of the input file(s) or the one specified by --assign-primaries."
                     " If both this and --assign-primaries are specified, conversion will be performed from "
                     " the assigned primaries to the primaries specified by this option, if different."
                     " This option is not allowed to be specified when --assign-primaries is set to 'none'."
-                    " Case insensitive."
-                    "\nPossible options are:"
-                    " bt709 | srgb | bt601-ebu | bt601-smpte | bt2020 | ciexyz | aces | acescc | ntsc1953 | pal525 | displayp3 | adobergb.",
+                    " Possible options match the khr_df_transfer_e enumerators without the KHR_DF_TRANSFER_ prefix."
+                    " The KHR_DF_PRIMARIES_ prefix is ignored if present. Case insensitive."
+                    "\nThe options are:"
+                    " bt709 | srgb | bt601_ebu | bt601_smpte | bt2020 | ciexyz | aces | acescc | ntsc1953 | pal525 | displayp3 | adobergb.",
                     cxxopts::value<std::string>(), "<primaries>")
+                (kConvertTexcoordOrigin, "Convert the input image(s) so the texture coordinate origin s=0,"
+                    " t=0, is at the specified corner of the image. If both this and --assign-texcoord-origin"
+                    " are specified, conversion will be performed from the assigned origin to the origin"
+                    " specified by this option, if different. Case insensitive."
+                    "\nPossible options are top-left | bottom-left. -front | -back can be appended and"
+                    " one of these is required when --depth is specified. Must be top-left if --cubemap"
+                    " is specified."
+                    "\nInput images whose origin does not match corner will be flipped vertically."
+                    " KTXorientation metadata indicating the specified origin is written to the output file.",
+                    cxxopts::value<std::string>(), "<origin>")
                 (kFailOnColorConversions, "Generates an error if any of the input images would need to be color converted.")
-                (kWarnOnColorConversions, "Generates a warning if any of the input images are color converted.");
+                (kWarnOnColorConversions, "Generates a warning if any of the input images are color converted.")
+                (kNoWarnOnColorConversions, "Disable all warnings about color conversions including that for"
+                    " visually lossy conversions. Overrides --warn-on-color-conversions should both be specified.")
+                (kFailOnOriginChanges, "Generates an error if any of the input images would need to have their origin changed.")
+                (kWarnOnOriginChanges, "Generates a warning if any of the input images have their origin changed.");
 
         opts.add_options("Generate Mipmap")
                 (kMipmapFilter, "Specifies the filter to use when generating the mipmaps. Case insensitive."
+                    " Ignored unless --generate-mipmap, --scale, --width or --height are specified for"
+                    " non-raw input."
                     "\nPossible options are:"
                     " box | tent | bell | b-spline | mitchell | blackman | lanczos3 | lanczos4 | lanczos6 |"
                     " lanczos12 | kaiser | gaussian | catmullrom | quadratic_interp | quadratic_approx | "
                     " quadratic_mix."
                     " Defaults to lanczos4.",
                     cxxopts::value<std::string>(), "<filter>")
-                (kMipmapFilterScale, "The filter scale to use. Defaults to 1.0.", cxxopts::value<float>(), "<float>")
+                (kMipmapFilterScale, "The filter scale to use. Defaults to 1.0. Ignored unless --generate-mipmap,"
+                    " --scale, --width or --height are specified for non-raw input.",
+                    cxxopts::value<float>(), "<float>")
                 (kMipmapWrap, "Specify how to sample pixels near the image boundaries. Case insensitive."
+                    " Ignored unless --generate-mipmap, --scale, --width or --height are specified for"
+                    " non-raw input."
                     "\nPossible options are:"
                     " wrap | reflect | clamp."
                     " Defaults to clamp.", cxxopts::value<std::string>(), "<mode>");
     }
 
-    std::optional<khr_df_transfer_e> parseTransferFunction(cxxopts::ParseResult& args, const char* argName, Reporter& report) const {
+    std::optional<khr_df_transfer_e> parseTransferFunction(cxxopts::ParseResult& args,
+                                                  const char* argName,
+                                                  const char* deprArgName,
+                                                  Reporter& report) const {
+        // Many of these are aliases of others. To prevent breakage, in the
+        // unlikely event one is changed to not be an alias, the aliased
+        // enumerator names are used.
         static const std::unordered_map<std::string, khr_df_transfer_e> values{
+            { "NONE", KHR_DF_TRANSFER_UNSPECIFIED },
             { "LINEAR", KHR_DF_TRANSFER_LINEAR },
-            { "SRGB", KHR_DF_TRANSFER_SRGB }
+            { "SRGB", KHR_DF_TRANSFER_SRGB },
+            { "SRGB_EOTF", KHR_DF_TRANSFER_SRGB_EOTF },  // SRGB
+            { "SCRGB", KHR_DF_TRANSFER_SCRGB },          // SRGB
+            { "SCRGB_EOTF", KHR_DF_TRANSFER_SRGB_EOTF }, // SRGB
+            { "ITU", KHR_DF_TRANSFER_ITU },
+            { "ITU_OETF", KHR_DF_TRANSFER_ITU_OETF },     // ITU
+            { "BT601", KHR_DF_TRANSFER_BT601_OETF },      // ITU
+            { "BT601_OETF", KHR_DF_TRANSFER_BT601_OETF }, // ITU
+            { "BT709", KHR_DF_TRANSFER_BT709_OETF },      // ITU
+            { "BT709_OETF", KHR_DF_TRANSFER_BT709_OETF }, // ITU
+            { "BT2020", KHR_DF_TRANSFER_BT2020_OETF },      // ITU
+            { "BT2020_OETF", KHR_DF_TRANSFER_BT2020_OETF }, // ITU
+            { "SMPTE170M", KHR_DF_TRANSFER_SMTPE170M },           // ITU
+            { "SMPTE170M_EOTF", KHR_DF_TRANSFER_SMTPE170M_EOTF }, // ITU
+            { "SMPTE170M_OETF", KHR_DF_TRANSFER_SMTPE170M_OETF }, // ITU
+            { "NTSC", KHR_DF_TRANSFER_NTSC },
+            { "NTSC_EOTF", KHR_DF_TRANSFER_NTSC_EOTF },  // NTSC
+            { "SLOG", KHR_DF_TRANSFER_SLOG },
+            { "SLOG_OETF", KHR_DF_TRANSFER_SLOG_OETF }, // SLOG
+            { "SLOG2", KHR_DF_TRANSFER_SLOG2 },
+            { "SLOG2_OETF", KHR_DF_TRANSFER_SLOG2_OETF }, // SLOG2
+            { "BT1886", KHR_DF_TRANSFER_BT1886 },
+            { "BT1886_EOTF", KHR_DF_TRANSFER_BT1886_EOTF }, // BT1886
+            { "HLG_OETF", KHR_DF_TRANSFER_HLG_OETF },
+            { "HLG_EOTF", KHR_DF_TRANSFER_HLG_EOTF },
+            { "PQ_OETF", KHR_DF_TRANSFER_PQ_OETF },
+            { "PQ_EOTF", KHR_DF_TRANSFER_PQ_EOTF },
+            { "DCIP3", KHR_DF_TRANSFER_DCIP3 },
+            { "DCIP3_EOTF", KHR_DF_TRANSFER_DCIP3_EOTF }, // DCIP3
+            { "PAL_OETF", KHR_DF_TRANSFER_PAL_OETF },
+            { "PAL625_EOTF", KHR_DF_TRANSFER_PAL625_EOTF },
+            { "ST240", KHR_DF_TRANSFER_ST240 },
+            { "ST240_EOTF", KHR_DF_TRANSFER_ST240_EOTF }, // ST240
+            { "ST240_OETF", KHR_DF_TRANSFER_ST240_OETF }, // ST240
+            { "ACESCC", KHR_DF_TRANSFER_ACESCC },
+            { "ACESCC_OETF", KHR_DF_TRANSFER_ACESCC_OETF }, // ACESCC
+            { "ACESCCT", KHR_DF_TRANSFER_ACESCCT },
+            { "ACESCCT_OETF", KHR_DF_TRANSFER_ACESCCT_OETF }, // ACESCCT
+            { "ADOBERGB", KHR_DF_TRANSFER_ADOBERGB },
+            { "ADOBERGB_EOTF", KHR_DF_TRANSFER_ADOBERGB_EOTF }, // ADOBERGB
+            { "HLG_UNNORMALIZED_OETF", KHR_DF_TRANSFER_HLG_UNNORMALIZED_OETF },
         };
 
         std::optional<khr_df_transfer_e> result = {};
+        const char* argNameToUse = nullptr;
 
         if (args[argName].count()) {
-            const auto oetfStr = args[argName].as<std::string>();
-            const auto it = values.find(to_upper_copy(oetfStr));
+            argNameToUse = argName;
+        } else if (args[deprArgName].count()) { // Prefer non-depcrecated name.
+            report.warning("Option --{} is deprecated and will be removed in the next release. Use --{} instead.",
+                           deprArgName, argName);
+            argNameToUse = deprArgName;
+        }
+
+        if (argNameToUse) {
+            auto transferStr = to_upper_copy(args[argNameToUse].as<std::string>());
+            const std::string prefixStr = "KHR_DF_TRANSFER_";
+            if (transferStr.find(prefixStr) == 0) {
+                transferStr.erase(transferStr.begin(),
+                                  transferStr.begin() + prefixStr.size());
+            }
+            const auto it = values.find(transferStr);
             if (it != values.end()) {
                 result = it->second;
             } else {
-                report.fatal_usage("Invalid or unsupported transfer function specified as --{} argument: \"{}\".", argName, oetfStr);
+                report.fatal_usage("Invalid or unsupported transfer specified as --{} argument: \"{}\".",
+                                   argNameToUse, args[argNameToUse].as<std::string>());
             }
         }
 
@@ -196,8 +348,8 @@ struct OptionsCreate {
             { "NONE", KHR_DF_PRIMARIES_UNSPECIFIED },
             { "BT709", KHR_DF_PRIMARIES_BT709 },
             { "SRGB", KHR_DF_PRIMARIES_SRGB },
-            { "BT601-EBU", KHR_DF_PRIMARIES_BT601_EBU },
-            { "BT601-SMPTE", KHR_DF_PRIMARIES_BT601_SMPTE },
+            { "BT601_EBU", KHR_DF_PRIMARIES_BT601_EBU },
+            { "BT601_SMPTE", KHR_DF_PRIMARIES_BT601_SMPTE },
             { "BT2020", KHR_DF_PRIMARIES_BT2020 },
             { "CIEXYZ", KHR_DF_PRIMARIES_CIEXYZ },
             { "ACES", KHR_DF_PRIMARIES_ACES },
@@ -211,13 +363,70 @@ struct OptionsCreate {
         std::optional<khr_df_primaries_e> result = {};
 
         if (args[argName].count()) {
-            const auto primariesStr = args[argName].as<std::string>();
-            const auto it = values.find(to_upper_copy(primariesStr));
+            auto primariesStr = to_upper_copy(args[argName].as<std::string>());
+            const std::string prefixStr = "KHR_DF_PRIMARIES_";
+            if (primariesStr.find(prefixStr) == 0) {
+                primariesStr.erase(primariesStr.begin(),
+                                   primariesStr.begin() + prefixStr.size());
+            }
+            const auto it = values.find(primariesStr);
             if (it != values.end()) {
                 result = it->second;
             } else {
-                report.fatal_usage("Invalid or unsupported primaries specified as --{} argument: \"{}\".", argName, primariesStr);
+                report.fatal_usage("Invalid or unsupported primaries specified as --{} argument: \"{}\".", argName,
+                                   args[argName].as<std::string>());
             }
+        }
+
+        return result;
+    }
+
+  std::optional<ImageSpec::Origin> parseTexcoordOrigin(cxxopts::ParseResult& args, uint32_t numDimensions, const char* argName, Reporter& report) const {
+        std::optional<ImageSpec::Origin> result;
+        if (args[argName].count()) {
+            // RE to extract origin for each dimension.
+            // - Match 0 is whole matching string.
+            // - Match 1 is the y origin.
+            // - Match 2 is the x origin.
+            // - Match 3 is the z origin. Empty string, if not specified.
+            // Use raw literal to avoid excess blackslashes
+            std::regex re(R"--((?:\b(top|bottom)\b-)(?:\b(left)\b)(?:-\b(front|back)\b)?)--");
+            // For when support for right origin and 1d textures is added.
+            //               y dimension made optional ꜜ right added ꜜ
+            //std::regex re(R"--((?:\b(top|bottom)\b-)?(?:\b(left|right)\b)(?:-\b(front|back)\b)?)--");
+
+            // "auto" here leads to no matching function call for regex_match.
+            const std::string& originStr = to_lower_copy(args[argName].as<std::string>());
+            std::smatch sm;
+            std::regex_match(originStr.begin(), originStr.end(), sm, re);
+#if DEBUG_REGEX
+              std::cout << "match size: " << sm.size() << '\n';
+              for(uint32_t i = 0; i < sm.size(); i++) {
+                  std::cout << "match " << i << ": " << "\"" << sm.str(i) << "\"" << '\n';
+              }
+#endif
+            if (sm.empty()) {
+                report.fatal_usage("Invalid or unsupported origin specified as --{} argument: \"{}\".", argName, originStr);
+            }
+            if (numDimensions == 3 && sm.str(3).empty()) {
+                report.fatal_usage("Z origin must be specified in --{} argument for a 3D texture.", argName);
+            }
+
+            ImageSpec::Origin orig;
+            // Remember, compare returns 0 for a match.
+            orig.x = sm.str(2).compare("left") ? ImageSpec::Origin::eRight
+                                               : ImageSpec::Origin::eLeft;
+            orig.y = sm.str(1).compare("bottom") ? ImageSpec::Origin::eTop
+                                                 : ImageSpec::Origin::eBottom;
+            if (args[kCubemap].count()) {
+                if (orig.x != ImageSpec::Origin::eLeft || orig.y != ImageSpec::Origin::eTop) {
+                    report.fatal_usage("--{} argument must be top-left for a cubemap.", argName);
+                }
+            }
+            if (numDimensions == 3)
+                orig.z = sm.str(3).compare("front") ? ImageSpec::Origin::eFront
+                                                    : ImageSpec::Origin::eBack;
+            result = std::move(orig);
         }
 
         return result;
@@ -285,6 +494,12 @@ struct OptionsCreate {
                 mipmapWrap = it->second;
         }
 
+        if (args[kNormalize].count()) {
+            if (raw)
+                report.fatal_usage("Option --{} cannot be used with --{}.", kNormalize, kRaw);
+            normalize = true;
+        }
+
         if (args[kSwizzle].count()) {
             swizzle = to_lower_copy(args[kSwizzle].as<std::string>());
             const auto errorFmt = "Invalid --swizzle value: \"{}\". The value must match the \"[rgba01]{{4}}\" regex.";
@@ -304,6 +519,16 @@ struct OptionsCreate {
                     report.fatal_usage(errorFmt, *swizzleInput);
         }
 
+        uint32_t numDimensions = 2;
+        if (args[kDepth].count())
+            numDimensions = 3;
+        else if (args[k1D].count())
+            numDimensions = 1;
+        assignTexcoordOrigin = parseTexcoordOrigin(args, numDimensions,
+                                              kAssignTexcoordOrigin, report);
+        convertTexcoordOrigin = parseTexcoordOrigin(args, numDimensions,
+                                              kConvertTexcoordOrigin, report);
+
         if (args[kFormat].count()) {
             const auto formatStr = args[kFormat].as<std::string>();
             const auto parsedVkFormat = parseVkFormat(formatStr);
@@ -313,6 +538,12 @@ struct OptionsCreate {
             vkFormat = *parsedVkFormat;
         } else {
             report.fatal_usage("Required option 'format' is missing.");
+        }
+
+        if (args[kScale].count()) {
+            if (args[kWidth].count() || args[kHeight].count())
+                report.fatal_usage("{} cannot be used with {} or {}.", kScale, kWidth, kHeight);
+            imageScale = args[kScale].as<float>();
         }
 
         // List of formats that have supported format conversions
@@ -451,11 +682,6 @@ struct OptionsCreate {
                 report.fatal_usage("Option --width is missing but is required for --raw texture creation.");
             if (!height)
                 report.fatal_usage("Option --height is missing but is required for --raw texture creation.");
-        } else {
-            if (width)
-                report.warning("Option --width is ignored for non-raw texture creation.");
-            if (height)
-                report.warning("Option --height is ignored for non-raw texture creation.");
         }
 
         if (width == 0u)
@@ -500,55 +726,69 @@ struct OptionsCreate {
         if (mipmapGenerate && depth)
             report.fatal_usage("Mipmap generation for 3D textures is not supported: --generate-mipmap cannot be used with --depth.");
 
-        if (mipmapFilter && !mipmapGenerate)
-            report.fatal_usage("Option --mipmap-filter can only be used if --generate-mipmap is set.");
-
-        if (mipmapFilterScale && !mipmapGenerate)
-            report.fatal_usage("Option --mipmap-filter-scale can only be used if --generate-mipmap is set.");
-
-        if (mipmapWrap && !mipmapGenerate)
-            report.fatal_usage("Option --mipmap-wrap can only be used if --generate-mipmap is set.");
-
         formatDesc = createFormatDescriptor(vkFormat, report);
 
-        convertOETF = parseTransferFunction(args, kConvertOetf, report);
-        assignOETF = parseTransferFunction(args, kAssignOetf, report);
+        convertTF = parseTransferFunction(args, kConvertTf, kConvertOetf, report);
+        assignTF = parseTransferFunction(args, kAssignTf, kAssignOetf, report);
+
+        if (convertTF.has_value()) {
+            switch (convertTF.value()) {
+                case KHR_DF_TRANSFER_LINEAR: [[fallthrough]];
+                case KHR_DF_TRANSFER_SRGB:
+                    break;
+                default:
+                    report.fatal_usage("Unsupported transfer function {} for --{}.",
+                                       args[kConvertTf].as<std::string>(), kConvertTf);
+            }
+        }
 
         convertPrimaries = parseColorPrimaries(args, kConvertPrimaries, report);
         assignPrimaries = parseColorPrimaries(args, kAssignPrimaries, report);
 
         if (convertPrimaries.has_value() && assignPrimaries == KHR_DF_PRIMARIES_UNSPECIFIED)
-            report.fatal_usage("Option --convert-primaries cannot be used when --assign-primaries is set to 'none'.");
+            report.fatal_usage("Option --{} cannot be used when --{} is set to 'none'.",
+                               kConvertPrimaries, kAssignPrimaries);
 
         if (raw) {
-            if (convertOETF.has_value())
-                report.fatal_usage("Option --convert-oetf cannot be used with --raw.");
+            if (convertTF.has_value())
+                report.fatal_usage("Option {} cannot be used with --{}.", kConvertTf, kRaw);
             if (convertPrimaries.has_value())
-                report.fatal_usage("Option --convert-primaries cannot be used with --raw.");
+                report.fatal_usage("Option {} cannot be used with --{}.", kConvertPrimaries, kRaw);
+            if (convertTexcoordOrigin.has_value())
+                report.fatal_usage("Option {} cannot be used with --{}.", kConvertTexcoordOrigin, kRaw);
+            if (imageScale.has_value())
+                report.fatal_usage("Option {} cannot be used with --{}.", kScale, kRaw);
         }
 
         if (formatDesc.transfer() == KHR_DF_TRANSFER_SRGB) {
-            const auto error_message = "Invalid value to --{} \"{}\" for format \"{}\". Transfer function must be sRGB for sRGB formats.";
-            if (!convertOETF.has_value() && assignOETF.has_value()) {
-                switch (assignOETF.value()) {
+            const auto error_message = "Invalid value \"{}\" to --{} for format \"{}\". Transfer function must be sRGB for sRGB formats.";
+            if (!convertTF.has_value() && assignTF.has_value()) {
+                switch (assignTF.value()) {
                 case KHR_DF_TRANSFER_UNSPECIFIED:
                 case KHR_DF_TRANSFER_SRGB:
-                    // assign-oetf must either not be specified or must be sRGB for an sRGB format
+                    // assign-tf must either not be specified or must be sRGB for an sRGB format
                     break;
                 default:
-                    report.fatal_usage(error_message, "assign-oetf", args[kAssignOetf].as<std::string>(), args[kFormat].as<std::string>());
+                    report.fatal_usage(error_message, args[kAssignTf].count() ? args[kAssignTf].as<std::string>() : args[kAssignOetf].as<std::string>(),
+                                       kAssignTf, args[kFormat].as<std::string>());
                 }
-            } else if (convertOETF.has_value() && convertOETF != KHR_DF_TRANSFER_SRGB) {
-                report.fatal_usage(error_message, "convert-oetf", args[kConvertOetf].as<std::string>(), args[kFormat].as<std::string>());
+            } else if (convertTF.has_value() && convertTF != KHR_DF_TRANSFER_SRGB) {
+                report.fatal_usage(error_message, args[kConvertTf].count() ? args[kConvertTf].as<std::string>() : args[kConvertOetf].as<std::string>(),
+                                   kConvertTf, args[kFormat].as<std::string>());
             }
         }
 
+        if (isFormatSRGB(vkFormat) && normalize)
+            report.fatal_usage("Option --{} cannot be used with sRGB formats.", kNormalize);
+
         if (isFormatNotSRGBButHasSRGBVariant(vkFormat)) {
-            const auto error_message = "Invalid value to --{} \"{}\" for format \"{}\". Transfer function must not be sRGB for a non-sRGB VkFormat with sRGB variant.";
-            if (!convertOETF.has_value() && assignOETF.has_value() && assignOETF == KHR_DF_TRANSFER_SRGB) {
-                report.fatal_usage(error_message, "assign-oetf", args[kAssignOetf].as<std::string>(), args[kFormat].as<std::string>());
-            } else if (convertOETF.has_value() && convertOETF == KHR_DF_TRANSFER_SRGB) {
-                report.fatal_usage(error_message, "convert-oetf", args[kConvertOetf].as<std::string>(), args[kFormat].as<std::string>());
+            const auto error_message = "Invalid value \"{}\" to --{} for format \"{}\". Transfer function must not be sRGB for a non-sRGB VkFormat with sRGB variant.";
+            if (!convertTF.has_value() && assignTF.has_value() && assignTF == KHR_DF_TRANSFER_SRGB) {
+                report.fatal_usage(error_message, args[kAssignTf].count() ? args[kAssignTf].as<std::string>() : args[kAssignOetf].as<std::string>(),
+                                   kAssignTf, args[kFormat].as<std::string>());
+            } else if (convertTF.has_value() && convertTF == KHR_DF_TRANSFER_SRGB) {
+                report.fatal_usage(error_message, args[kConvertTf].count() ? args[kConvertTf].as<std::string>() : args[kConvertOetf].as<std::string>(),
+                                   kConvertTf, args[kFormat].as<std::string>());
             }
         }
 
@@ -557,8 +797,19 @@ struct OptionsCreate {
 
         if (args[kWarnOnColorConversions].count()) {
             if (failOnColorConversions)
-                report.fatal_usage("The options --fail-on-color-conversions and warn-on-color-conversions are mutually exclusive.");
+                report.fatal_usage("The options --{} and --{} are mutually exclusive.",
+                                   kFailOnColorConversions, kWarnOnColorConversions);
             warnOnColorConversions = true;
+        }
+
+        if (args[kFailOnOriginChanges].count())
+            failOnOriginChanges = true;
+
+        if (args[kWarnOnOriginChanges].count()) {
+            if (failOnOriginChanges)
+                report.fatal_usage("The options --{} and --{} are mutually exclusive.",
+                                   kFailOnOriginChanges, kWarnOnOriginChanges);
+            warnOnOriginChanges = true;
         }
     }
 };
@@ -573,7 +824,7 @@ Create a KTX2 file from various input files.
 @section ktx_create_synopsis SYNOPSIS
     ktx create [option...] @e input-file... @e output-file
 
-@section ktx_create_description DESCRIPTION
+@section ktx\_create\_description DESCRIPTION
     @b ktx @b create can create, encode and supercompress a KTX2 file from the
     input images specified as the @e input-file... arguments and save it as the
     @e output-file. The last positional argument is treated as the @e output-file.
@@ -583,159 +834,369 @@ Create a KTX2 file from various input files.
     Each @e input-file must be a valid EXR (.exr), PNG (.png) or Raw (.raw) file.
     PNG files with luminance (L) or luminance + alpha (LA) data will be converted
     to RGB as LLL and RGBA as LLLA before processing further.
-    The input file formats must be compatible with the requested KTX format enum and
-    must have at least the same level of precision and number of channels.
+    The input file formats must be compatible with the requested KTX format enum
+    and must have at least the same level of precision and number of channels.
     Any unused channel will be discarded silently.
 
-    The number of input-files specified must match the expected number of input images
-    based on the used options.
+    The number of input-files specified must match the expected number of input
+    images based on the used options.
 
 @section ktx\_create\_options OPTIONS
   @subsection ktx\_create\_options\_general General Options
     The following are available:
     <dl>
         <dt>\--format &lt;enum&gt;</dt>
-        <dd>KTX format enum that specifies the data format of the images in the created texture.
-            The enum names are matching the VkFormats without the VK_FORMAT_ prefix.
-            The VK_FORMAT_ prefix is ignored if present. Case insensitive. Required.<br />
+        <dd>KTX format enum that specifies the data format for the images in the
+            created texture. The enum names match the VkFormat names without the
+            VK\_FORMAT\_ prefix. The VK\_FORMAT\_ prefix is ignored if present.
+            Case insensitive. Required.<br />
             <br />
-            If the format is an ASTC format a texture object with the target format
-            @c R8G8B8_{SRGB,UNORM} or  @c R8G8B8A8_{SRGB,UNORM} is created
-            then encoded to the specified ASTC format. The latter format is chosen if alpha
-            is present in the input. @c SRGB or @c UNORM is chosen depending on the
-            specified ASTC format. The ASTC-specific and common encoder options listed
-            @ref ktx_create_options_encoding "below" become valid, otherwise they are ignored.
-            <!--This matches the functionality of the @ref ktx_encode "ktx encode" command
-            when an ASTC format is specified.<br /> -->
+            If the format is an ASTC format a texture object with the target
+            format @c R8G8B8_{SRGB,UNORM} or  @c R8G8B8A8_{SRGB,UNORM} is
+            created then encoded to the specified ASTC format. The latter format
+            is chosen if alpha is present in the input. @c SRGB or @c UNORM is
+            chosen depending on the specified ASTC format. The ASTC-specific and
+            common encoder options listed @ref ktx_create_options_encoding
+            "below" become valid, otherwise they are ignored. This matches the
+            functionality of the @ref ktx_encode "ktx encode" command when an
+            ASTC format is specified.<br />
             <br />
-            When used with @b \--encode it specifies the target format before the encoding step.
-            In this case it must be one of:
+            When used with @b \--encode it specifies the target format before
+            the encoding step. In this case it must be one of:
             <ul>
-                <li>R8_UNORM</li>
-                <li>R8_SRGB</li>
-                <li>R8G8_UNORM</li>
-                <li>R8G8_SRGB</li>
-                <li>R8G8B8_UNORM</li>
-                <li>R8G8B8_SRGB</li>
-                <li>R8G8B8A8_UNORM</li>
-                <li>R8G8B8A8_SRGB</li>
+                <li>R8\_UNORM</li>
+                <li>R8\_SRGB</li>
+                <li>R8G8\_UNORM</li>
+                <li>R8G8\_SRGB</li>
+                <li>R8G8B8\_UNORM</li>
+                <li>R8G8B8\_SRGB</li>
+                <li>R8G8B8A8\_UNORM</li>
+                <li>R8G8B8A8\_SRGB</li>
             </ul>
-            The format will be used to verify and load all input files into a texture before
-            performing any specified encoding.
+            The format will be used to verify and load all input files into a
+            texture before performing any specified encoding.<br />
         </dd>
         <dt>\--encode basis-lz | uastc</dt>
         <dd>Encode the texture with the specified codec before saving it.
-            This option matches the functionality of the @ref ktx_encode "ktx encode" command.
-            With each choice, the specific and common encoder options listed
-            @ref ktx_create_options_encoding "below"  become valid, otherwise they
-            are ignored. Case-insensitive.</dd>
+            This option matches the functionality of the @ref ktx_encode
+            "ktx encode" command. With each choice, the specific and common
+            encoder options listed @ref ktx_create_options_encoding "below"
+            become valid, otherwise they are ignored. Case-insensitive.</dd>
 
             @snippet{doc} ktx/encode_utils_basis.h command options_basis_encoders
         <dt>\--1d</dt>
-        <dd>Create a 1D texture. If not set the texture will be a 2D or 3D texture.</dd>
+        <dd>Create a 1D texture. If not set the texture will be a 2D or
+            3D texture.</dd>
         <dt>\--cubemap</dt>
-        <dd>Create a cubemap texture. If not set the texture will be a 2D or 3D texture.</dd>
+        <dd>Create a cubemap texture. If not set the texture will be a 2D or
+            3D texture.</dd>
         <dt>\--raw</dt>
         <dd>Create from raw image data.</dd>
         <dt>\--width</dt>
-        <dd>Base level width in pixels.</dd>
+        <dd>Base level width in pixels. Required with \--raw. For non-raw, if not
+            set, the image width is used otherwise the image is resampled to this width
+            and any provided mip levels are resampled proportionately. For non-raw it
+            enables use of the 'Generate Mipmap' options listed under \--generate-mipmap
+            to tune the resampler.</dd>
         <dt>\--height</dt>
-        <dd>Base level height in pixels.</dd>
+        <dd>Base level height in pixels. Required with \--raw. For non-raw, if not
+            set, the image height is used otherwise the image is resampled to this height
+            and any provided mip levels are resampled proportionately. For non-raw it
+            enables use of the 'Generate Mipmap' options listed under \--generate-mipmap
+            to tune the resampler.</dd>
         <dt>\--depth</dt>
         <dd>Base level depth in pixels.
             If set the texture will be a 3D texture.</dd>
         <dt>\--layers</dt>
         <dd>Number of layers.
             If set the texture will be an array texture.</dd>
+        <dt>\--levels</dt>
+        <dd>Number of mip levels. This is the number of level images to include in the texture
+            being created. If @b \--generate-mipmap is specified this number of level images
+            will be generated otherwise this number of input images must be provided.
+            Generates an error if the value is greater than the maximum possible for the
+            specified dimensions of the texture or, for non-raw, the dimensions of the base
+            level image as possibly modified by @b \--scale.</dd>
         <dt>\--runtime-mipmap</dt>
         <dd>Runtime mipmap generation mode.
-            Sets up the texture to request the mipmaps to be generated by the client application at
-            runtime.</dd>
+            Sets up the texture to request the mipmaps to be generated by the
+            client application at runtime.</dd>
         <dt>\--generate-mipmap</dt>
         <dd>Causes mipmaps to be generated during texture creation.
-            If the --levels is not specified the maximum possible mip level will be generated.
-            This option is mutually exclusive with --runtime-mipmap and cannot be used with SINT,
-            UINT or 3D textures.</dd>
-            When set it enables the use of the following \'Generate Mipmap\' options.
+            If @b \--levels is not specified the maximum possible mip level will
+            be generated. This option is mutually exclusive with
+            --runtime-mipmap and cannot be used with SINT, UINT or 3D textures.
+            When set it enables the use of the following 'Generate Mipmap'
+            options.
         <dl>
             <dt>\--mipmap-filter &lt;filter&gt;</dt>
-            <dd>Specifies the filter to use when generating the mipmaps. Case insensitive.<br />
+            <dd>Specifies the filter to use when generating the mipmaps.
+                Case insensitive. Ignored unless --generate-mipmap, --scale,
+                --width or --height are specified for non-raw input.<br />
                 Possible options are:
-                box | tent | bell | b-spline | mitchell | blackman | lanczos3 | lanczos4 | lanczos6 |
-                lanczos12 | kaiser | gaussian | catmullrom | quadratic_interp | quadratic_approx |
+                box | tent | bell | b-spline | mitchell | blackman | lanczos3 |
+                lanczos4 | lanczos6 | lanczos12 | kaiser | gaussian |
+                catmullrom | quadratic_interp | quadratic_approx |
                 quadratic_mix.
                 Defaults to lanczos4.</dd>
             <dt>\--mipmap-filter-scale &lt;float&gt;</dt>
             <dd>The filter scale to use.
-                Defaults to 1.0.</dd>
+                Defaults to 1.0. Ignored unless --generate-mipmap, --scale,
+                --width or --height are specified for non-raw input.</dd>
             <dt>\--mipmap-wrap &lt;mode&gt;</dt>
-            <dd>Specify how to sample pixels near the image boundaries. Case insensitive.<br />
+            <dd>Specify how to sample pixels near the image boundaries.
+                Case insensitive. Ignored unless --generate-mipmap, --scale,
+                --width or --height are specified for non-raw input.<br />
                 Possible options are:
                 wrap | reflect | clamp.
                 Defaults to clamp.</dd>
         </dl>
+        Avoid mipmap generation if the Output TF (see @ref ktx\_create\_tf\_handling
+        below) is non-linear and is not sRGB.
+        </dd>
+        <dt>\--scale</dt>
+        <dd>Scale images as they are loaded. Cannot be used with --raw.
+            It enables use of the 'Generate Mipmap' options listed under \--generate-mipmap
+            to tune the resampler.</dd>
+        <dt>\--normalize</dt>
+        <dd>Normalize input normals to have a unit length. Only valid for
+            linear normal textures with 2 or more components. For 2-component
+            inputs 2D unit normals are calculated. Do not use these 2D unit
+            normals to generate X+Y normals with @b --normal-mode. For 4-component
+            inputs a 3D unit normal is calculated. 1.0 is used for the value of
+            the 4th component. Cannot be used with @b \--raw.</dd>
         <dt>\--swizzle [rgba01]{4}</dt>
         <dd>KTX swizzle metadata.</dd>
         <dt>\--input-swizzle [rgba01]{4}</dt>
         <dd>Pre-swizzle input channels.</dd>
-        <dt>\--assign-oetf &lt;oetf&gt;</dt>
-        <dd>Force the created texture to have the specified transfer function, ignoring
-            the transfer function of the input file(s). Case insensitive.
-            Possible options are:
-            linear | srgb
+        <dt>\--assign-tf &lt;transfer function&gt;</dt>
+        <dd>Force the created texture to have the specified transfer function,
+            ignoring the transfer function of the input file(s). Possible
+            options match the khr_df_transfer_e enumerators without the
+            KHR_DF_TRANSFER_ prefix. The KHR_DF_TRANSFER_ prefix
+            is ignored if present. Case nsensitive. The options are:
+            linear | srgb | srgb_eotf | scrgb | scrgb_eotf | itu | itu_oetf |
+            bt601 | bt601_oetf | bt709 | bt709_oetf | bt2020 | bt2020_oetf |
+            smpte170m | smpte170m_oetf | smpte170m_eotf | ntsc | ntsc_eotf |
+            slog | slog_oetf | slog2 | slog2_oetf | bt1886 | bt1886_eotf |
+            hlg_oetf | hlg_eotf | pq_oetf | pg_eotf | dcip3 | dcip3_eotf |
+            pal_oetf | pal625_eotf | st240 | st240_oetf | st240_eotf | acescc |
+            acescc_oetf | acescct | acescct_oetf | abobergb | adobergb_eotf
+            See @ref ktx_create_tf_handling below for important information.
             </dd>
+        <dt>\--assign-oetf &lt;transfer function&gt;</dt>
+        <dd>Deprecated and will be removed. Use @b \--assign-tf instead.</dd>
         <dt>\--assign-primaries &lt;primaries&gt;</dt>
-        <dd>Force the created texture to have the specified color primaries, ignoring
-            the color primaries of the input file(s). Case insensitive.
-            Possible options are:
-            none | bt709 | srgb | bt601-ebu | bt601-smpte | bt2020 | ciexyz | aces | acescc |
-            ntsc1953 | pal525 | displayp3 | adobergb
+        <dd>Force the created texture to have the specified color primaries,
+            ignoring the color primaries of the input file(s). Possible options
+            match the khr_df_primaries_e enumerators without the
+            KHR_DF_PRIMARIES_ prefix. The KHR_DF_PRIMARIES_ prefix is ignored
+            if present. Case insensitive. The options are:
+            none | bt709 | srgb | bt601_ebu | bt601_smpte | bt2020 | ciexyz |
+            aces | acescc | ntsc1953 | pal525 | displayp3 | adobergb.
+            @note @c bt601-ebu and @c bt601-smpte, supported in previous
+            releases, have been replaced with names consistent with
+            khr_df_primaries_e.
             </dd>
-        <dt>\--convert-oetf &lt;oetf&gt;</dt>
-        <dd>Convert the input image(s) to the specified transfer function, if different
-            from the transfer function of the input file(s). If both this and --assign-oetf are
-            specified, conversion will be performed from the assigned transfer function to the
-            transfer function specified by this option, if different. Case insensitive.
-            Possible options are:
-            linear | srgb
+        <dt>\--assign-texcoord-origin &lt;corner&gt;</dt>
+        <dd>Force the created texture to indicate that the texture coordinate
+            origin s=0, t=0 is at the specified @em corner of the logical image.
+            Case insensitive. Possible options are top-left | bottom-left.
+            -front | -back can be appended and one of these is required when
+            @b \--depth is specified. Must be top-left if @b \--cubemap is
+            specified. Absent @b —convert-texcoord-origin, the effect of this
+            option is to cause @e KTXorientation metadata indicating the
+            specified origin to be written to the output file. Example values
+            are "rd" (top-left) and "ru" (bottom-left) or, when @b \--depth is
+            specified, "rdi" (top-left-front) and "rui" (bottom-left-front).
             </dd>
+        <dt>\--convert-tf &lt;transfer function&gt;</dt>
+        <dd>Convert the input image(s) to the specified transfer function, if
+            different from the transfer function of the input file(s). If both
+            this and @b \--assign-tf are specified, conversion will be
+            performed from the assigned transfer function to the transfer
+            function specified by this option, if different. Cannot be used with
+            @b \--raw. Case insensitive.
+            The options are: linear | srgb. The following srgb aliases are
+            also supported: srgb_eotf | scrgb | scrgb_eotf.
+            See @ref ktx_create_tf_handling below for more information.
+            </dd>
+        <dt>\--convert-oetf &lt;transfer function&gt;</dt>
+        <dd>Deprecated and will be removed. Use @b \--convert-tf instead.</dd>
         <dt>\--convert-primaries &lt;primaries&gt;</dt>
-        <dd>Convert the image image(s) to the specified color primaries, if different
-            from the color primaries of the input file(s) or the one specified by --assign-primaries.
-            If both this and --assign-primaries are specified, conversion will be performed from
-            the assigned primaries to the primaries specified by this option, if different.
-            This option is not allowed to be specified when --assign-primaries is set to 'none'.
-            Case insensitive.
-            Possible options are:
-            bt709 | srgb | bt601-ebu | bt601-smpte | bt2020 | ciexyz | aces | acescc | ntsc1953 |
+        <dd>Convert the input image(s) to the specified color primaries, if
+            different from the color primaries of the input file(s) or the one
+            specified by @b \--assign-primaries. If both this and
+            @b \--assign-primaries are specified, conversion will be performed
+            from the assigned primaries to the primaries specified by this
+            option, if different. This option is not allowed to be specified
+            when @b \--assign-primaries is set to 'none'.
+            Cannot be used with @b \--raw. Possible options match the
+            khr_df_primaries_e enumerators without the KHR_DF_PRIMARIES_
+            prefix. The KHR_DF_PRIMARIES_ prefix is ignored if present.
+            Case insensitive. The options are:
+            bt709 | srgb | bt601_ebu | bt601_smpte | bt2020 | ciexyz | aces | acescc | ntsc1953 |
             pal525 | displayp3 | adobergb
+            @note @c bt601-ebu and @c bt601-smpte, supported in previous
+            releases, have been replaced with names consistent with
+            khr_df_primaries_e.
+        <dt>\--convert-texcoord-origin &lt;corner&gt;</dt>
+        <dd>Convert the input image(s) so the texture coordinate origin s=0,
+            t=0, is at the specified @em corner of the logical image. If both
+            this and @b \--assign-texcoord-origin are specified, conversion will
+            be performed from the assigned origin to the origin specified by
+            this option, if different. The default for images in KTX files is
+            top-left which corresponds to the origin in most image file
+            formats. Cannot be used with @b \--raw. Case insensitive.
+            Possible options are: top-left | bottom-left. -front | -back can be
+            appended and one of these is required when @b \--depth is specified.
+            Must be top-left if @b \--cubemap is specified.<br />
+            <br />
+            Input images whose origin does not match @em corner will be flipped
+            vertically. @e KTXorientation metadata indicating the
+            the specified origin is written to the output file. Example values
+            are "rd" (top-left) and "ru" (bottom-left) or, when @b \--depth is
+            specified, "rdi" (top-left-front) and "rui" (bottom-left-back).
+            Generates an error if the input image origin is unknown as is the
+            case with raw image data.  Use @b --assign-texcoord-origin to
+            specify the orientation.
+            @note ktx create cannot rotate or flip incoming images, except
+            for a y-flip, so use an an image processing tool to reorient images
+            whose first data stream pixel is not at the logical top-left or
+            bottom-left of the image before using as input here. Such images
+            may be indicated by Exif-style orientation metadata in the file.
             </dd>
         <dt>\--fail-on-color-conversions</dt>
-        <dd>Generates an error if any of the input images would need to be color converted.</dd>
+        <dd>Generates an error if any input images would need to be
+            color converted.</dd>
         <dt>\--warn-on-color-conversions</dt>
-        <dd>Generates a warning if any of the input images are color converted.</dd>
+        <dd>Generates a warning if any input images are color
+            converted. Adds warnings for explicitly requested and visually
+            lossless implicit conversions to that generated for visually lossy
+            conversions.
+            </dd>
+        <dt>\--no-warn-on-color-conversions</dt>
+        <dd>Disable all warnings about color conversions including that for
+            visually lossy conversions. Overrides
+            @b \--warn-on-color-conversions should both be specified.
+            </dd>
+        <dt>\--fail-on-origin-changes</dt>
+        <dd>Generates an error if any of the input images would need to have
+            their origin changed.</dd>
+        <dt>\--warn-on-origin-changes</dt>
+        <dd>Generates a warning if any of the input images have their origin
+            changed..</dd>
     </dl>
     @snippet{doc} ktx/deflate_utils.h command options_deflate
     @snippet{doc} ktx/command.h command options_generic
 
   @subsection ktx\_create\_options\_encoding Specific and Common Encoding Options
-    The following are available. Specific options become valid only if their encoder has been
-    selected. Common encoder options become valid when an encoder they apply to has
-    been selected. Otherwise they are ignored.
+    The following are available. Specific options become valid only if their
+    encoder has been selected. Common encoder options become valid when an
+    encoder they apply to has been selected. Otherwise they are ignored.
     @snippet{doc} ktx/encode_utils_astc.h command options_encode_astc
     @snippet{doc} ktx/encode_utils_basis.h command options_encode_basis
     @snippet{doc} ktx/encode_utils_common.h command options_encode_common
     @snippet{doc} ktx/metrics_utils.h command options_metrics
+
+@section ktx_create_tf_handling TRANSFER FUNCTION HANDLING
+
+The diagram below shows all assignments and conversions that can take place.
+
+<!-- No way to disable Xcode syntax coloring for a file part. -->
+<!-- Live with the bad Xcode rendering. -->
+<!-- ASCII art created with the help of  https://asciiflow.com. -->
+
+@verbatim
+
+┌──────────┐                                     ┌─────────┐
+│          ├──────────────────1─────────────────►│         │
+│          │  ┌───────────┐                      │         │
+│ Input    │  │           │                      │         │
+│ Transfer │  │ --assign- ├──────────2──────────►│Output   │
+│ function │  │   tf      │    ┌────────────┐    │Transfer │
+│ from     │  │           ├─3─►│            │    │Function │
+│ file     │  │           │    │ --convert- │    │         │
+│ metadata │  └───────────┘    │   tf       ├3,4►│         │
+│          │                   │            │    │         │
+│          ├────────4─────────►│            │    │         │
+└──────────┘                   └────────────┘    └─────────┘
+
+@endverbatim
+
+<h4>Processing Paths</h4>
+<ol>
+<li>Pass through. No options specified.</li>
+<li>@b \--assign-tf specified.</li>
+<li>@b \--assign-tf and @b \--convert-tf specified.</li>
+<li>@b \--convert-tf specified.</li>
+</ol>
+
+@subsection ktx_create_tf_handling_details Details
+Transfer function handling proceeds as follows:
+<ul>
+<li>If @b \--format specifies one of the  @c *_SRGB{,_*} formats and
+    Output Transfer Function is not sRGB (a.k.a scRGB) an error is generated.</li>
+<li>If @b \--format does not specify one of the @c *_SRGB{,_*} formats, an
+    sRGB variant exists and Output Transfer Function is sRGB (a.k.a scRGB), an
+    error is generated.</li>
+<li>Otherwise, the transfer function of the output KTX file is set to Output
+    Transfer Function.</li>
+<li>If neither @b \--assign-tf nor @b \--convert-tf is specified:
+    <ul>
+    <li>If the Input Transfer Function is not sRGB (a.k.a scRGB) for
+    @c *_SRGB{,_*} formats an implicit conversion to sRGB is done, equivalent
+    to @b \--convert-tf srgb.</li>
+    <li>If the Input Transfer Function is not linear for formats that are not
+    one of the @c *_SRGB{,_*} formats, an implicit conversion to linear is done
+    equivalent to @b --convert-tf linear.</li>
+    </ul></li>
+<li>Supported inputs for implicit or explicit conversion are linear, sRGB,
+    ITU (a.k.a BT601, BT.709, BT.2020 and SMPTE170M) and PQ EOTF. An error is
+    generated if an unsupported conversion is required.</li>
+<li>Supported outputs for implicit or explicit conversion are linear and sRGB,
+    An error is generated if an unsupported conversion is required.</li>
+<li>Output Transfer Function for a format that is not one of the @c *_SRGB{,_*}
+    formats can be set to a non-linear transfer function via
+    @b \--assign-tf.</li>
+<li>A warning is generated if a visually lossy color-conversion is performed.
+    sRGB to linear is considered visually lossy because there is a high chance
+    it will introduce artifacts visible to the human eye such as banding.
+    The warning can be suppressed with @b \--no-warn-on-color-conversions.
+    A warning or an error on any color conversion can be requested with
+    @b \--warn-on-color-conversions or @b \--fail-on-color-conversions .
+</ul>
+@note When @b \--format does not specify one of the *_SRGB{,_*} formats and
+      Output Transfer Function is not linear:
+      @li the KTX file may be much less portable due to limited hardware
+          support of such inputs.
+      @li avoid using @b \--generate-mipmap as the filters can only decode
+          sRGB.
+      @li avoid encoding to ASTC, BasisLz/ETC1S or UASTC. The encoders'
+          quality metrics are designed for linear and sRGB.
+
+
+@subsection ktx_create_tf_handling_changes Changes since last Release
+<ol>
+<li>@b \--assign-oetf and @b \--convert-oetf are deprecated and will be
+    removed. Use @b \--assign-tf and @b \--convert-tf instead.
+<li>The parameter value for @b \--assign-tf can now be any of the
+    transfer functions known to the Khronos Data Format Specification.</li>
+<li>A warning is now generated if a visually lossy color conversion will
+    be performed. The warning can be suppressed with
+    @b \--no-warn-on-color-conversions.
+    </li>
+</ol>
 
 @section ktx_create_exitstatus EXIT STATUS
     @snippet{doc} ktx/command.h command exitstatus
 
 @section ktx_create_history HISTORY
 
-@par Version 4.0
+@par Version 4.3
  - Initial version
 
- @par Version 4.4
+@par Version 4.4
  - Reorganize encoding options.
  - Improve explanation of use of @b \--format with @b \--encode.
  - Improve explanation of ASTC encoding.
@@ -743,6 +1204,7 @@ Create a KTX2 file from various input files.
 @section ktx_create_author AUTHOR
     - Mátyás Császár [Vader], RasterGrid www.rastergrid.com
     - Daniel Rákos, RasterGrid www.rastergrid.com
+    - Mark Callow
 */
 class CommandCreate : public Command {
 private:
@@ -773,6 +1235,7 @@ private:
     [[nodiscard]] KTXTexture2 createTexture(const ImageSpec& target);
     void generateMipLevels(KTXTexture2& texture, std::unique_ptr<Image> image, ImageInput& inputFile,
             uint32_t numMipLevels, uint32_t layerIndex, uint32_t faceIndex, uint32_t depthSliceIndex);
+    std::unique_ptr<Image> scaleImage(std::unique_ptr<Image> image, uint32_t width, uint32_t height);
 
     [[nodiscard]] std::string readRawFile(const std::filesystem::path& filepath);
     [[nodiscard]] std::unique_ptr<Image> loadInputImage(ImageInput& inputImageFile);
@@ -781,8 +1244,12 @@ private:
     std::unique_ptr<const ColorPrimaries> createColorPrimaries(khr_df_primaries_e primaries) const;
 
     void selectASTCMode(uint32_t bitLength);
+    void determineSourceColorSpace(const ImageInput& in, SrcColorSpaceInfo& srcColorSpaceInfo);
     void determineTargetColorSpace(const ImageInput& in, ImageSpec& target, ColorSpaceInfo& colorSpaceInfo);
+    void determineSourceOrigin(const ImageInput& in, ImageSpec::Origin& usedSourceOrigin);
+    void determineTargetOrigin(const ImageInput& in, ImageSpec& target, ImageSpec::Origin& usedSourceOrigin);
 
+    void checkNumInputImages();
     void checkSpecsMatch(const ImageInput& current, const ImageSpec& firstSpec);
 };
 
@@ -808,6 +1275,25 @@ void CommandCreate::initOptions(cxxopts::Options& opts) {
     options.init(opts);
 }
 
+void CommandCreate::checkNumInputImages() {
+    const auto blockSizeZ = isFormat3DBlockCompressed(options.vkFormat) ?
+       createFormatDescriptor(options.vkFormat, *this).basic.texelBlockDimension2 + 1u : 1u;
+    uint32_t expectedInputImages = 0;
+    for (uint32_t i = 0; i < (options.mipmapGenerate ? 1 : options.levels.value_or(1)); ++i)
+        // If --generate-mipmap is set the input only contains the base level images
+        expectedInputImages += numLayers * numFaces * ceil_div(std::max(baseDepth >> i, 1u), blockSizeZ);
+    if (options.inputFilepaths.size() != expectedInputImages) {
+        fatal_usage("Too {} input images for {} level{}, {} layer, {} face and {} depth. Provided {} but expected {}.",
+                options.inputFilepaths.size() > expectedInputImages ? "many" : "few",
+                numLevels,
+                options.mipmapGenerate ? " (mips generated)" : "",
+                numLayers,
+                numFaces,
+                baseDepth,
+                options.inputFilepaths.size(), expectedInputImages);
+    }
+}
+
 void CommandCreate::processOptions(cxxopts::Options& opts, cxxopts::ParseResult& args) {
     options.process(opts, args, *this);
 
@@ -816,21 +1302,9 @@ void CommandCreate::processOptions(cxxopts::Options& opts, cxxopts::ParseResult&
     numFaces = options.cubemap ? 6 : 1;
     baseDepth = options.depth.value_or(1u);
 
-    const auto blockSizeZ = isFormat3DBlockCompressed(options.vkFormat) ?
-            createFormatDescriptor(options.vkFormat, *this).basic.texelBlockDimension2 + 1u : 1u;
-    uint32_t expectedInputImages = 0;
-    for (uint32_t i = 0; i < (options.mipmapGenerate ? 1 : numLevels); ++i)
-        // If --generate-mipmap is set the input only contains the base level images
-        expectedInputImages += numLayers * numFaces * ceil_div(std::max(baseDepth >> i, 1u), blockSizeZ);
-    if (options.inputFilepaths.size() != expectedInputImages) {
-        fatal_usage("Too {} input image for {} level{}, {} layer, {} face and {} depth. Provided {} but expected {}.",
-                options.inputFilepaths.size() > expectedInputImages ? "many" : "few",
-                numLevels,
-                options.mipmapGenerate ? " (mips generated)" : "",
-                numLayers,
-                numFaces,
-                baseDepth,
-                options.inputFilepaths.size(), expectedInputImages);
+    if (options.raw) {
+        // options.levels <= max for dimensions was checked in CreateOptions::process
+        checkNumInputImages();
     }
 
     if (!isFormatAstc(options.vkFormat)) {
@@ -870,15 +1344,17 @@ void CommandCreate::processOptions(cxxopts::Options& opts, cxxopts::ParseResult&
         }
     }
 
-    const auto canCompare = options.codec == BasisCodec::BasisLZ || options.codec == BasisCodec::UASTC;
+    const auto basisCodec = options.codec == BasisCodec::BasisLZ || options.codec == BasisCodec::UASTC;
+    const auto astcCodec = isFormatAstc(options.vkFormat);
+    const auto canCompare = basisCodec || astcCodec;
 
-    if (canCompare)
+    if (basisCodec)
         fillOptionsCodecBasis<decltype(options)>(options);
 
     if (options.compare_ssim && !canCompare)
-        fatal_usage("--compare-ssim can only be used with BasisLZ or UASTC encoding.");
+        fatal_usage("--compare-ssim can only be used with BasisLZ, UASTC or ASTC encoding.");
     if (options.compare_psnr && !canCompare)
-        fatal_usage("--compare-psnr can only be used with BasisLZ or UASTC encoding.");
+        fatal_usage("--compare-psnr can only be used with BasisLZ, UASTC or ASTC encoding.");
 
     if (isFormatAstc(options.vkFormat) && !options.raw) {
         options.encodeASTC = true;
@@ -963,6 +1439,7 @@ void CommandCreate::processOptions(cxxopts::Options& opts, cxxopts::ParseResult&
     if (options._1d && options.encodeASTC)
         fatal_usage("ASTC format {} cannot be used for 1 dimensional textures (indicated by --1d).",
                 toString(options.vkFormat));
+
 }
 
 template <typename F>
@@ -1016,9 +1493,11 @@ void CommandCreate::executeCreate() {
     targetChannelCount = options.formatDesc.channelCount();
 
     ImageSpec target;
+    ColorSpaceInfo colorSpaceInfo{};
 
     bool firstImage = true;
     ImageSpec firstImageSpec{};
+    uint32_t maxLevels = 1;
 
     foreachImage(options.formatDesc, [&](
             const auto& inputFilepath,
@@ -1039,11 +1518,14 @@ void CommandCreate::executeCreate() {
                     fatal(rc::INVALID_FILE, "--cubemap specified but the input image \"{}\" with size {}x{} is not square.",
                             fmtInFile(inputFilepath), target.width(), target.height());
 
-                if (options.assignOETF.has_value())
-                    target.format().setTransfer(options.assignOETF.value());
+                if (options.assignTF.has_value())
+                    target.format().setTransfer(options.assignTF.value());
 
                 if (options.assignPrimaries.has_value())
                     target.format().setPrimaries(options.assignPrimaries.value());
+
+                if (options.assignTexcoordOrigin.has_value())
+                    target.setOrigin(options.assignTexcoordOrigin.value());
 
                 texture = createTexture(target);
             }
@@ -1067,17 +1549,29 @@ void CommandCreate::executeCreate() {
             const auto inputImageFile = ImageInput::open(inputFilepath, nullptr, warningFn);
             inputImageFile->seekSubimage(0, 0); // Loading multiple subimage from the same input is not supported
 
-            target = ImageSpec{
-                    inputImageFile->spec().width(),
-                    inputImageFile->spec().height(),
+            ImageSpec::Origin usedSourceOrigin;
+
+            if (std::exchange(firstImage, false)) {
+                uint32_t targetWidth, targetHeight;
+                if (options.imageScale.has_value()) {
+                    targetWidth = static_cast<uint32_t>(inputImageFile->spec().width()
+                                                        * options.imageScale.value());
+                    targetHeight = static_cast<uint32_t>(inputImageFile->spec().height()
+                                                         * options.imageScale.value());
+                    // TODO: scale depth
+                } else {
+                    targetWidth = options.width.value_or(inputImageFile->spec().width());
+                    targetHeight = options.height.value_or(inputImageFile->spec().height());
+                    // TODO: handle resampling depth
+                }
+
+                target = ImageSpec{
+                    targetWidth,
+                    targetHeight,
                     options.depth.value_or(1u),
                     options.formatDesc};
 
-            ColorSpaceInfo colorSpaceInfo{};
-            determineTargetColorSpace(*inputImageFile, target, colorSpaceInfo);
-
-            if (std::exchange(firstImage, false)) {
-                if (options.cubemap && target.width() != target.height())
+               if (options.cubemap && target.width() != target.height())
                     fatal(rc::INVALID_FILE, "--cubemap specified but the input image \"{}\" with size {}x{} is not square.",
                             fmtInFile(inputFilepath), target.width(), target.height());
 
@@ -1086,34 +1580,138 @@ void CommandCreate::executeCreate() {
                             fmtInFile(inputFilepath), target.height());
 
                 const auto maxDimension = std::max(target.width(), std::max(target.height(), baseDepth));
-                const auto maxLevels = log2(maxDimension) + 1;
-                if (options.levels.value_or(1) > maxLevels)
-                    fatal_usage("Requested {} levels is too many. With input image \"{}\" sized {}x{} and depth {} the texture can only have {} levels at most.",
-                            options.levels.value_or(1), fmtInFile(inputFilepath), target.width(), target.height(), baseDepth, maxLevels);
+                maxLevels = log2(maxDimension) + 1;
+                if (options.levels.value_or(1) > maxLevels) {
+                    auto errorFmt = "Requested {} levels is too many. With {} {}x{} and depth {} the texture can only have {} levels at most.";
+                    std::string baseExpl;
+                    if (options.width.has_value() || options.height.has_value()) {
+                        baseExpl = "a requested base image size of";
+                    } else if (options.imageScale.has_value()) {
+                        baseExpl = fmt::format(
+                                           "base input image \"{}\" sized {}x{} * scale {} being",
+                                           fmtInFile(inputFilepath), inputImageFile->spec().width(),
+                                           inputImageFile->spec().height(),
+                                           options.imageScale.value());
+                    } else {
+                        baseExpl = fmt::format("base input image \"{}\" sized", fmtInFile(inputFilepath));
+                    }
+                    fatal_usage(errorFmt, options.levels.value_or(1),
+                                baseExpl,
+                                target.width(), target.height(),
+                                baseDepth, maxLevels);
+                }
+
+                checkNumInputImages();
 
                 if (options.encodeASTC)
                     selectASTCMode(inputImageFile->spec().format().largestChannelBitLength());
 
                 firstImageSpec = inputImageFile->spec();
+
+                determineTargetColorSpace(*inputImageFile, target, colorSpaceInfo);
+                determineTargetOrigin(*inputImageFile, target, usedSourceOrigin);
+      
                 texture = createTexture(target);
             } else {
                 checkSpecsMatch(*inputImageFile, firstImageSpec);
+                determineSourceColorSpace(*inputImageFile, colorSpaceInfo.src);
+                determineSourceOrigin(*inputImageFile, usedSourceOrigin);
             }
 
-            const uint32_t imageWidth = std::max(firstImageSpec.width() >> levelIndex, 1u);
-            const uint32_t imageHeight = std::max(firstImageSpec.height() >> levelIndex, 1u);
+            const uint32_t expectedImageWidth = std::max(firstImageSpec.width() >> levelIndex, 1u);
+            const uint32_t expectedImageHeight = std::max(firstImageSpec.height() >> levelIndex, 1u);
+            const uint32_t targetImageWidth = std::max(target.width() >> levelIndex, 1u);
+            const uint32_t targetImageHeight = std::max(target.height() >> levelIndex, 1u);
 
-            if (inputImageFile->spec().width() != imageWidth || inputImageFile->spec().height() != imageHeight)
-                fatal(rc::INVALID_FILE, "Input image \"{}\" with size {}x{} does not match expected size {}x{} for level {}.",
-                        fmtInFile(inputFilepath), inputImageFile->spec().width(), inputImageFile->spec().height(), imageWidth, imageHeight, levelIndex);
-
+            if (inputImageFile->spec().width() != expectedImageWidth || inputImageFile->spec().height() != expectedImageHeight) {
+                const auto errorFmt = "Input image \"{}\" with size {}x{} does not match expected size {}x{} for level {}.";
+                fatal(rc::INVALID_FILE, errorFmt, fmtInFile(inputFilepath),
+                      inputImageFile->spec().width(),
+                      inputImageFile->spec().height(),
+                      // When no scaling option is specified image* == targetImage*.
+                      expectedImageWidth, expectedImageHeight,
+                      levelIndex);
+            }
             auto image = loadInputImage(*inputImageFile);
 
-            if (colorSpaceInfo.dstTransferFunction != nullptr) {
-                assert(colorSpaceInfo.srcTransferFunction != nullptr);
-                if (colorSpaceInfo.dstColorPrimaries != nullptr) {
-                    assert(colorSpaceInfo.srcColorPrimaries != nullptr);
-                    auto primaryTransform = colorSpaceInfo.srcColorPrimaries->transformTo(*colorSpaceInfo.dstColorPrimaries);
+            // Need to do color conversion if either the transfer functions or primaries don't
+            // match. Primaries conversion requires decode to linear then reencode thus
+            // transferFunctions are always required.
+            if (target.format().transfer() != colorSpaceInfo.src.usedTransferFunction ||
+                target.format().primaries() != colorSpaceInfo.src.usedPrimaries) {
+                assert((target.format().primaries() == colorSpaceInfo.src.usedPrimaries
+                       || colorSpaceInfo.src.usedPrimaries != KHR_DF_PRIMARIES_UNSPECIFIED)
+                       && "determineSourceColorSpace failed to check for UNSPECIFIED.");
+                const auto errorFmt = "Colorspace conversion requires unsupported {} {} {}.";
+                if (colorSpaceInfo.src.transferFunction == nullptr) {
+                    std::string source;
+                    if (options.assignTF.has_value()) {
+                        source = fmt::format("specified with --{}", options.kAssignTf);
+                    } else {
+                        source = fmt::format("used by input file \"{}\"", fmtInFile(inputFilepath));
+                    }
+                    auto errorMsg = fmt::format(errorFmt,
+                                                "decode from",
+                                                toString(colorSpaceInfo.src.usedTransferFunction),
+                                                source);
+                    if (!options.assignTF.has_value()) {
+                        errorMsg += fmt::format(" Use an image processing tool to convert it or use"
+                                                " --{}, with or without --{}, to specify handling.",
+                                                options.kAssignTf, options.kConvertTf);
+                    }
+                    fatal(rc::NOT_SUPPORTED, errorMsg);
+                }
+                if (colorSpaceInfo.dst.transferFunction == nullptr) {
+                    // If we get here it is because (a) a transfer supported for decode but not
+                    // encode has been set with --assign-tf and (b) a primary conversion was
+                    // requested with --convert-primaries. CLI checks prevent an unsupported
+                    // transfer being given to --convert-tf.
+                    auto source = fmt::format("specified with --{}", options.convertTF.has_value()
+                                              ? options.kConvertTf : options.kAssignTf);
+                    auto errorMsg = fmt::format(errorFmt,
+                                                "encode to",
+                                                toString(target.format().transfer()),
+                                                source);
+                    // Transfer functions derived from --format values are supported.
+                    if (target.format().primaries() != colorSpaceInfo.src.usedPrimaries) {
+                        errorMsg += fmt::format(" Decode and encode with transfer function is"
+                                                " required to convert primaries to {}.",
+                                                toString(target.format().primaries()));
+                    }
+                    fatal(rc::NOT_SUPPORTED, errorMsg);
+                }
+                if (!options.noWarnOnColorConversions) {
+                    if (target.format().model() == KHR_DF_MODEL_RGBSDA
+                        && target.format().transfer() == KHR_DF_TRANSFER_LINEAR) {
+                        uint32_t bitLength;
+                        try {
+                            bitLength = target.format().channelBitLength();
+                        } catch(...) {
+                            // This happens if channels have different bit length. Check just R.
+                            // If format is something like RGB565, any channel length would fail
+                            // the bitLength test so picking R doesn't matter.
+                            bitLength = target.format().channelBitLength(KHR_DF_CHANNEL_RGBSDA_R);
+                        }
+
+                        if (bitLength < 14) {
+                            // Per Poynton, >= 14 bits is enough to handle all transitions
+                            // visible to a human
+                            if (colorSpaceInfo.src.usedTransferFunction == KHR_DF_TRANSFER_SRGB
+                               || colorSpaceInfo.src.usedTransferFunction == KHR_DF_TRANSFER_ITU) {
+                              warning("Input file \"{}\" is undergoing a visual lossy color conversion from {} "
+                                      "to KHR_DF_TRANSFER_LINEAR. Specify an _SRGB format with --{} to prevent "
+                                      "this warning.",
+                                      fmtInFile(inputFilepath),
+                                      toString(colorSpaceInfo.src.usedTransferFunction),
+                                      options.kFormat);
+                            }
+                        }
+                    }
+                }
+                if (target.format().primaries() != colorSpaceInfo.src.usedPrimaries) {
+                //if (colorSpaceInfo.dst.colorPrimaries != nullptr) {
+                    //assert(colorSpaceInfo.src.colorPrimaries != nullptr);
+                    auto primaryTransform = colorSpaceInfo.src.colorPrimaries->transformTo(*colorSpaceInfo.dst.colorPrimaries);
 
                     if (options.failOnColorConversions)
                         fatal(rc::INVALID_FILE,
@@ -1126,23 +1724,79 @@ void CommandCreate::executeCreate() {
                             "Use --assign-primaries and do not use --convert-primaries to avoid unwanted color conversions.",
                             fmtInFile(inputFilepath));
 
-                    // Transform OETF with primary transform
-                    image->transformColorSpace(*colorSpaceInfo.srcTransferFunction, *colorSpaceInfo.dstTransferFunction, &primaryTransform);
+                    // Transform transfer function with primary transform
+                    image->transformColorSpace(*colorSpaceInfo.src.transferFunction, *colorSpaceInfo.dst.transferFunction, &primaryTransform);
                 } else {
                     if (options.failOnColorConversions)
                         fatal(rc::INVALID_FILE,
                             "Input file \"{}\" would need color conversion as input and output transfer functions are different. "
-                            "Use --assign-oetf and do not use --convert-oetf to avoid unwanted color conversions.",
+                            "Use --assign-tf and do not use --convert-tf to avoid unwanted color conversions.",
                             fmtInFile(inputFilepath));
 
                     if (options.warnOnColorConversions)
                         warning("Input file \"{}\" is color converted as input and output transfer functions are different. "
-                            "Use --assign-oetf and do not use --convert-oetf to avoid unwanted color conversions.",
+                            "Use --assign-tf and do not use --convert-tf to avoid unwanted color conversions.",
                             fmtInFile(inputFilepath));
 
-                    // Transform OETF without primary transform
-                    image->transformColorSpace(*colorSpaceInfo.srcTransferFunction, *colorSpaceInfo.dstTransferFunction);
+                    // Transform transfer function without primary transform
+                    image->transformColorSpace(*colorSpaceInfo.src.transferFunction, *colorSpaceInfo.dst.transferFunction);
                 }
+            }
+
+            // TODO: Add auto conversion and warning? Not needed now
+            // because all supported source formats provide top-left images.
+
+            if (image->getWidth() != targetImageWidth || image->getHeight() != targetImageHeight)
+                image = scaleImage(std::move(image), targetImageWidth, targetImageHeight);
+
+            if (target.origin() != usedSourceOrigin) {
+                    if (options.failOnOriginChanges)
+                        fatal(rc::INVALID_FILE,
+                            "Input file \"{}\" would need to be y-flipped as input and output origins are different. "
+                            "Use --{} and do not use --{} to avoid unwanted origin conversions.",
+                            fmtInFile(inputFilepath), OptionsCreate::kAssignTexcoordOrigin,
+                            OptionsCreate::kConvertTexcoordOrigin);
+
+                    if (options.warnOnOriginChanges)
+                        warning("Input file \"{}\" is y-flipped as input and output origins are different. "
+                            "Use --{} and do not use --{} to avoid unwanted origin conversions.",
+                            fmtInFile(inputFilepath), OptionsCreate::kAssignTexcoordOrigin,
+                            OptionsCreate::kConvertTexcoordOrigin);
+
+                // Only difference allowed by CLI is y down or y up.
+                image->yflip();
+            }
+
+            if (options.normalize) {
+                if (target.format().transfer() != KHR_DF_TRANSFER_UNSPECIFIED && target.format().transfer() != KHR_DF_TRANSFER_LINEAR) {
+                    // Report source of problematic TF.
+                    //
+                    // If --format is an SRGB format
+                    // - a fatal usage error will already have been thrown so nothing to do.
+                    // If --format is non-SRGB format
+                    // - absent TF options, an implicit conversion to LINEAR takes place if the file
+                    //   TF is not LINEAR or UNSPECIFIED. If it can't be converted a fatal
+                    //   unsupported conversion error will already have been thrown. Therefore
+                    //   nothing to do. But if `create` is changed to set the TF for non-SRGB
+                    //   formats from the file's TF then this error handling will need updating.
+                    // - --assign-tf has many other possible values so that is a possible source.
+                    // - --convert-tf can only be linear or srgb. If it's srgb and the format does
+                    //   not have an equivalent SRGB format, that is another possible source.
+
+                    //const auto input_error_message = "Input file \"{}\" The transfer function to be applied to the created texture is neither linear nor none. Normalize is only available for these transfer functions.";
+                    //const auto inputTransfer =  inputImageFile->spec().format().transfer();
+                    //bool is_file_error = (inputTransfer != KHR_DF_TRANSFER_UNSPECIFIED && inputTransfer != KHR_DF_TRANSFER_LINEAR);
+                    const auto option_error_message = "--{} value is {}. Normalize can only be used if the transfer function is linear or none.";
+                    if (options.convertTF.has_value()) {
+                        fatal_usage(option_error_message, OptionsCreate::kConvertTf,
+                                    toString(options.convertTF.value()));
+                    } else if (options.assignTF.has_value()) {
+                        fatal_usage(option_error_message, OptionsCreate::kAssignTf,
+                                    toString(options.assignTF.value()));
+                    }
+                    assert(false && "target.format().transfer() is not suitable for --normalize though --assign-tf and --conver-tf were not used.");
+                }
+                image->normalize();
             }
 
             if (options.swizzleInput)
@@ -1160,8 +1814,6 @@ void CommandCreate::executeCreate() {
             assert(ret == KTX_SUCCESS && "Internal error"); (void) ret;
 
             if (options.mipmapGenerate) {
-                const auto maxDimension = std::max(target.width(), std::max(target.height(), baseDepth));
-                const auto maxLevels = log2(maxDimension) + 1;
                 uint32_t numMipLevels = options.levels.value_or(maxLevels);
                 generateMipLevels(texture, std::move(image), *inputImageFile, numMipLevels, layerIndex, faceIndex, depthSliceIndex);
             }
@@ -1182,8 +1834,17 @@ void CommandCreate::executeCreate() {
     }
 
     // Encode and apply compression
-    encodeBasis(texture, options);
-    encodeASTC(texture, options);
+
+    MetricsCalculator metrics;
+    metrics.saveReferenceImages(texture, options, *this);
+
+    if (options.codec != BasisCodec::NONE)
+        encodeBasis(texture, options);
+    if (options.encodeASTC)
+        encodeASTC(texture, options);
+
+    metrics.decodeAndCalculateMetrics(texture, options, *this);
+
     compress(texture, options);
 
     // Add KTXwriterScParams metadata if ASTC encoding, BasisU encoding, or other supercompression was used
@@ -1208,25 +1869,16 @@ void CommandCreate::executeCreate() {
 // -------------------------------------------------------------------------------------------------
 
 void CommandCreate::encodeBasis(KTXTexture2& texture, OptionsEncodeBasis<false>& opts) {
-    MetricsCalculator metrics;
-    metrics.saveReferenceImages(texture, options, *this);
-
-    if (opts.codec != BasisCodec::NONE) {
-        auto ret = ktxTexture2_CompressBasisEx(texture, &opts);
-        if (ret != KTX_SUCCESS)
-            fatal(rc::KTX_FAILURE, "Failed to encode KTX2 file with codec \"{}\". KTX Error: {}",
-                    to_underlying(opts.codec), ktxErrorString(ret));
-    }
-
-    metrics.decodeAndCalculateMetrics(texture, options, *this);
+    auto ret = ktxTexture2_CompressBasisEx(texture, &opts);
+    if (ret != KTX_SUCCESS)
+        fatal(rc::KTX_FAILURE, "Failed to encode KTX2 file with codec \"{}\". KTX Error: {}",
+                to_underlying(opts.codec), ktxErrorString(ret));
 }
 
 void CommandCreate::encodeASTC(KTXTexture2& texture, OptionsEncodeASTC& opts) {
-    if (opts.encodeASTC) {
-        const auto ret = ktxTexture2_CompressAstcEx(texture, &opts);
-        if (ret != KTX_SUCCESS)
-            fatal(rc::KTX_FAILURE, "Failed to encode KTX2 file with codec ASTC. KTX Error: {}", ktxErrorString(ret));
-    }
+    const auto ret = ktxTexture2_CompressAstcEx(texture, &opts);
+    if (ret != KTX_SUCCESS)
+        fatal(rc::KTX_FAILURE, "Failed to encode KTX2 file with codec ASTC. KTX Error: {}", ktxErrorString(ret));
 }
 
 void CommandCreate::compress(KTXTexture2& texture, const OptionsDeflate& opts) {
@@ -1400,7 +2052,7 @@ std::vector<uint8_t> CommandCreate::convert(const std::unique_ptr<Image>& image,
         if (inputBitDepth < bitDepth)
             fatal(rc::INVALID_FILE, "{}: Not enough precision to convert {} bit input to {} bit output for {}.",
                     inputFile.filename(), inputBitDepth, bitDepth, toString(vkFormat));
-      if (inputBitDepth > imageio::bit_ceil(bitDepth))
+        if (inputBitDepth > imageio::bit_ceil(bitDepth))
             warning("{}: Possible loss of precision with converting {} bit input to {} bit output for {}.",
                     inputFile.filename(), inputBitDepth, bitDepth, toString(vkFormat));
     };
@@ -1812,7 +2464,7 @@ KTXTexture2 CommandCreate::createTexture(const ImageSpec& target) {
             const auto maxLevels = log2(maxDimension) + 1;
             createInfo.numLevels = options.levels.value_or(maxLevels);
         } else {
-            createInfo.numLevels = numLevels;
+            createInfo.numLevels = options.levels.value_or(1);
         }
     }
 
@@ -1824,14 +2476,49 @@ KTXTexture2 CommandCreate::createTexture(const ImageSpec& target) {
     KHR_DFDSETVAL(texture->pDfd + 1, PRIMARIES, target.format().primaries());
     KHR_DFDSETVAL(texture->pDfd + 1, TRANSFER, target.format().transfer());
 
+    // Add KTXorientation metadata
+    if (options.assignTexcoordOrigin.has_value() || options.convertTexcoordOrigin.has_value()) {
+        // This code is future-proofed by supporting "right" origin and 1d
+        // textures. Current imitations are enforced by CL option parsing.
+        std::string orientation;
+        orientation.resize(3);
+        orientation = target.origin().x == ImageSpec::Origin::eLeft ? "r" : "l";
+        if (!options._1d) {
+            orientation += target.origin().y == ImageSpec::Origin::eTop ? "d" : "u";
+            if (options.depth.has_value()) {
+                orientation += target.origin().z == ImageSpec::Origin::eFront ? "i" : "o";
+            }
+        }
+
+        ktxHashList_AddKVPair(&texture->kvDataHead, KTX_ORIENTATION_KEY,
+                static_cast<uint32_t>(orientation.size() + 1), // +1 to include the \0
+                orientation.c_str());
+    }
+
     return texture;
+}
+
+// TODO: This should probably be a method on Image.
+std::unique_ptr<Image>
+CommandCreate::scaleImage(std::unique_ptr<Image> image, ktx_uint32_t width, ktx_uint32_t height)
+{
+    try {
+        image = image->resample(width, height,
+                options.mipmapFilter.value_or(options.defaultMipmapFilter).c_str(),
+                options.mipmapFilterScale.value_or(options.defaultMipmapFilterScale),
+                options.mipmapWrap.value_or(options.defaultMipmapWrap));
+    } catch (const std::exception& e) {
+        fatal(rc::RUNTIME_ERROR, "Image resampling failed: {}", e.what());
+    }
+    return image;
 }
 
 void CommandCreate::generateMipLevels(KTXTexture2& texture, std::unique_ptr<Image> image, ImageInput& inputFile,
         uint32_t numMipLevels, uint32_t layerIndex, uint32_t faceIndex, uint32_t depthSliceIndex) {
 
     if (isFormatINT(static_cast<VkFormat>(texture->vkFormat)))
-        fatal(rc::NOT_SUPPORTED, "Mipmap generation for SINT or UINT format {} is not supported.", toString(static_cast<VkFormat>(texture->vkFormat)));
+        fatal(rc::NOT_SUPPORTED, "Mipmap generation for SINT or UINT format {} is not supported.",
+              toString(static_cast<VkFormat>(texture->vkFormat)));
 
     const auto baseWidth = image->getWidth();
     const auto baseHeight = image->getHeight();
@@ -1848,6 +2535,9 @@ void CommandCreate::generateMipLevels(KTXTexture2& texture, std::unique_ptr<Imag
         } catch (const std::exception& e) {
             fatal(rc::RUNTIME_ERROR, "Mipmap generation failed: {}", e.what());
         }
+
+        if (options.normalize)
+            image->normalize();
 
         const auto imageData = convert(image, options.vkFormat, inputFile);
 
@@ -1917,6 +2607,148 @@ std::unique_ptr<const ColorPrimaries> CommandCreate::createColorPrimaries(khr_df
     }
 }
 
+void CommandCreate::determineSourceColorSpace(const ImageInput& in, SrcColorSpaceInfo& srcColorSpaceInfo) {
+    const ImageSpec& spec = in.spec();
+
+    // Primaries handling:
+    //
+    // 1. Use assign-primaries option value, if set.
+    // 2. Use primaries info given by plugin.
+    // 3. If no primaries info and input is PNG use PNG spec.
+    //    recommendation of BT709/sRGB otherwise leave as
+    //    UNSPECIFIED.
+    // 4. If convert-primaries is specified but no primaries info is
+    //    given by the plugin then fail.
+
+    srcColorSpaceInfo.colorPrimaries = nullptr;
+    srcColorSpaceInfo.usedPrimaries = spec.format().primaries();
+    if (options.assignPrimaries.has_value()) {
+        srcColorSpaceInfo.usedPrimaries = options.assignPrimaries.value();
+    } else if (spec.format().primaries() == KHR_DF_PRIMARIES_UNSPECIFIED) {
+        if (!in.formatName().compare("png")) {
+            warning("No color primaries in PNG input file \"{}\", defaulting to BT.709.", in.filename());
+            srcColorSpaceInfo.usedPrimaries = KHR_DF_PRIMARIES_BT709;
+        } // else
+            // Leave as unspecified.
+    }
+
+    if (options.convertPrimaries.has_value()) {
+        if (srcColorSpaceInfo.usedPrimaries == KHR_DF_PRIMARIES_UNSPECIFIED) {
+            fatal(rc::INVALID_FILE, "Cannot convert primaries as no information about the color primaries "
+                "is available in the input file \"{}\". Use --{} to specify one.", in.filename(),
+                  options.kAssignPrimaries);
+        } else if (options.convertPrimaries.value() != srcColorSpaceInfo.usedPrimaries) {
+            srcColorSpaceInfo.colorPrimaries = createColorPrimaries(srcColorSpaceInfo.usedPrimaries);
+        }
+    }
+
+    // Transfer function handling in priority order:
+    //
+    // 1. Use assign-tf option value, if set.
+    // 2. Use transfer function signalled by plugin as the input transfer
+    //    function if linear, sRGB, ITU, or PQ EOTF. For all others, throw
+    //    error.
+    // 3. If ICC profile signalled, throw error. Known ICC profiles are
+    //    handled by the plugin.
+    // 4. If gamma of 1.0 signalled assume linear input transfer function.
+    //    If gamma of .45454 signalled, set up for conversion from gamma
+    //    and warn user about the conversion.
+    //    If gamma of 0.0 is signalled, for PNG follow W3C recommendation
+    //    per step 5. For any other gamma value, just convert it.
+    // 5. If no color info is signalled, and input is PNG follow W3C
+    //    recommendation of sRGB for 8-bit, linear otherwise. For other input
+    //    formats throw error.
+    // 6. Convert transfer function based on convert-tf option value or as
+    //    described above.
+
+    srcColorSpaceInfo.transferFunction = nullptr;
+    if (options.assignTF.has_value()) {
+        srcColorSpaceInfo.usedTransferFunction = options.assignTF.value();
+    } else {
+        // Set image's transfer function as indicated by metadata.
+        srcColorSpaceInfo.usedTransferFunction = spec.format().transfer();
+        if (spec.format().transfer() == KHR_DF_TRANSFER_UNSPECIFIED) {
+            if (spec.format().iccProfileName().size()) {
+                fatal(rc::INVALID_FILE,
+                     "Input file \"{}\" contains unsupported ICC profile \"{}\". Use --{} to specify a different one.",
+                     in.filename(), spec.format().iccProfileName(),
+                     options.kAssignTf);
+            } else if (spec.format().oeGamma() > 0.0f) {
+                if (spec.format().oeGamma() > .45450f && spec.format().oeGamma() < .45460f) {
+                    // N.B The previous loader matched oeGamma .45455 to the sRGB
+                    // transfer function and did not do a transformation. In this
+                    // loader we decode and reencode. Previous behavior can be
+                    // obtained with the --assign-tf option.
+                    //
+                    // This change results in 1 bit differences in the LSB of
+                    // some color values noticeable only when directly comparing
+                    // images produced before and after this change of loader.
+                    warning("Converting gamma 2.2f to sRGB. Use --{} srgb to force treating input as sRGB.",
+                            options.kAssignTf);
+                    srcColorSpaceInfo.transferFunction = std::make_unique<TransferFunctionGamma>(spec.format().oeGamma());
+                } else if (spec.format().oeGamma() == 1.0) {
+                    srcColorSpaceInfo.usedTransferFunction = KHR_DF_TRANSFER_LINEAR;
+                } else if (spec.format().oeGamma() > 0.0f) {
+                    // We allow any gamma, there is no reason why we could not
+                    // allow such input
+                    srcColorSpaceInfo.transferFunction = std::make_unique<TransferFunctionGamma>(spec.format().oeGamma());
+                } else if (spec.format().oeGamma() == 0.0f) {
+                    if (!in.formatName().compare("png")) {
+                        // If 8-bit, treat as sRGB, otherwise treat as linear.
+                        if (spec.format().channelBitLength() == 8) {
+                            srcColorSpaceInfo.usedTransferFunction = KHR_DF_TRANSFER_SRGB;
+                        } else {
+                            srcColorSpaceInfo.usedTransferFunction = KHR_DF_TRANSFER_LINEAR;
+                        }
+                        warning("Ignoring reported gamma of 0.0f in {}-bit PNG input file \"{}\". Handling as {}.",
+                                spec.format().channelBitLength(), in.filename(), toString(srcColorSpaceInfo.usedTransferFunction));
+                    } else {
+                        fatal(rc::INVALID_FILE,
+                              "Input file \"{}\" has gamma 0.0f. Use --{} to specify transfer function.",
+                              options.kAssignTf);
+                    }
+                } else {
+                    if (!options.convertTF.has_value()) {
+                        fatal(rc::INVALID_FILE, "Gamma {} not automatically supported by KTX. Specify handing with "
+                              "--{} or --{}.", spec.format().oeGamma(),
+                              options.kConvertTf, options.kAssignTf);
+                    }
+                }
+            } else if (!in.formatName().compare("png")) {
+                // If 8-bit, treat as sRGB, otherwise treat as linear.
+                if (spec.format().channelBitLength() == 8) {
+                  srcColorSpaceInfo.usedTransferFunction = KHR_DF_TRANSFER_SRGB;
+                } else {
+                  srcColorSpaceInfo.usedTransferFunction = KHR_DF_TRANSFER_LINEAR;
+                }
+                warning("No transfer function can be determined from {}-bit PNG input file \"{}\", defaulting to {}. Use --{} to override.",
+                        spec.format().channelBitLength(), in.filename(),
+                        toString(srcColorSpaceInfo.usedTransferFunction),
+                        options.kAssignTf);
+            }
+        }
+    }
+    if (srcColorSpaceInfo.transferFunction == nullptr) {
+      switch (srcColorSpaceInfo.usedTransferFunction) {
+        case KHR_DF_TRANSFER_LINEAR:
+            srcColorSpaceInfo.transferFunction = std::make_unique<TransferFunctionLinear>();
+            break;
+        case KHR_DF_TRANSFER_SRGB:
+            srcColorSpaceInfo.transferFunction = std::make_unique<TransferFunctionSRGB>();
+            break;
+        case KHR_DF_TRANSFER_ITU:
+            srcColorSpaceInfo.transferFunction = std::make_unique<TransferFunctionITU>();
+            break;
+        case KHR_DF_TRANSFER_PQ_EOTF:
+            srcColorSpaceInfo.transferFunction = std::make_unique<TransferFunctionBT2100_PQ_EOTF>();
+            break;
+        default:
+            // Lack of will be handled if a color transformation attempted.
+            break;
+        }
+    }
+}
+
 void CommandCreate::determineTargetColorSpace(const ImageInput& in, ImageSpec& target, ColorSpaceInfo& colorSpaceInfo) {
     // Primaries handling:
     //
@@ -1929,166 +2761,64 @@ void CommandCreate::determineTargetColorSpace(const ImageInput& in, ImageSpec& t
     //    given by the plugin then fail.
     // 5. If convert-primaries is specified and primaries info determined
     //    above is different then set up conversion.
-    const ImageSpec& spec = in.spec();
+
+    determineSourceColorSpace(in, colorSpaceInfo.src);
 
     // Set Primaries
-    colorSpaceInfo.usedInputPrimaries = spec.format().primaries();
-    if (options.assignPrimaries.has_value()) {
-        colorSpaceInfo.usedInputPrimaries = options.assignPrimaries.value();
-        target.format().setPrimaries(options.assignPrimaries.value());
-    } else if (spec.format().primaries() != KHR_DF_PRIMARIES_UNSPECIFIED) {
-        target.format().setPrimaries(spec.format().primaries());
-    } else {
-        if (!in.formatName().compare("png")) {
-            warning("No color primaries in PNG input file \"{}\", defaulting to BT.709.", in.filename());
-            colorSpaceInfo.usedInputPrimaries = KHR_DF_PRIMARIES_BT709;
-            target.format().setPrimaries(KHR_DF_PRIMARIES_BT709);
-        } else {
-            // Leave as unspecified.
-            target.format().setPrimaries(spec.format().primaries());
-        }
-    }
 
+    // If convert-primaries is specified and primaries info determined
+    // above is different then set up conversion.
     if (options.convertPrimaries.has_value()) {
-        if (colorSpaceInfo.usedInputPrimaries == KHR_DF_PRIMARIES_UNSPECIFIED) {
-            fatal(rc::INVALID_FILE, "Cannot convert primaries as no information about the color primaries "
-                "is available in the input file \"{}\". Use --assign-primaries to specify one.", in.filename());
-        } else if (options.convertPrimaries.value() != colorSpaceInfo.usedInputPrimaries) {
-            colorSpaceInfo.srcColorPrimaries = createColorPrimaries(colorSpaceInfo.usedInputPrimaries);
-            colorSpaceInfo.dstColorPrimaries = createColorPrimaries(options.convertPrimaries.value());
-            target.format().setPrimaries(options.convertPrimaries.value());
-        }
-    }
-
-    // OETF / Transfer function handling in priority order:
-    //
-    // 1. Use assign-oetf option value, if set.
-    // 2. Use OETF signalled by plugin as the input transfer function if
-    //    linear, sRGB, ITU, or PQ EOTF. For all others, throw error.
-    // 3. If ICC profile signalled, throw error. Known ICC profiles are
-    //    handled by the plugin.
-    // 4. If gamma of 1.0 signalled assume linear input transfer function.
-    //    If gamma of .45454 signalled, set up for conversion from gamma
-    //    and warn user about the conversion.
-    //    If gamma of 0.0 is signalled, for PNG follow W3C recommendation
-    //    per step 5. For any other gamma value, just convert it.
-    // 5. If no color info is signalled, and input is PNG follow W3C
-    //    recommendation of sRGB for 8-bit, linear otherwise. For other input
-    //    formats throw error.
-    // 6. Convert OETF based on convert-oetf option value or as described
-    //    above.
-
-    colorSpaceInfo.usedInputTransferFunction = KHR_DF_TRANSFER_UNSPECIFIED;
-    if (options.assignOETF.has_value()) {
-        if (options.assignOETF == KHR_DF_TRANSFER_SRGB) {
-            colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionSRGB>();
-        } else {
-            assert(options.assignOETF == KHR_DF_TRANSFER_LINEAR);
-            colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionLinear>();
-        }
-        colorSpaceInfo.usedInputTransferFunction = options.assignOETF.value();
-        target.format().setTransfer(options.assignOETF.value());
+        assert(colorSpaceInfo.src.usedPrimaries != KHR_DF_PRIMARIES_UNSPECIFIED
+               && "determineSourceColorSpace failed to check for UNSPECIFIED.");
+        target.format().setPrimaries(options.convertPrimaries.value());
+        // Okay to set this even if no conversion needed.
+        colorSpaceInfo.dst.colorPrimaries = createColorPrimaries(target.format().primaries());
     } else {
-        // Set image's OETF as indicated by metadata.
-        if (spec.format().transfer() != KHR_DF_TRANSFER_UNSPECIFIED) {
-            colorSpaceInfo.usedInputTransferFunction = spec.format().transfer();
-            switch (spec.format().transfer()) {
-            case KHR_DF_TRANSFER_LINEAR:
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionLinear>();
-                break;
-            case KHR_DF_TRANSFER_SRGB:
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionSRGB>();
-                break;
-            case KHR_DF_TRANSFER_ITU:
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionITU>();
-                break;
-            case KHR_DF_TRANSFER_PQ_EOTF:
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionBT2100_PQ_EOTF>();
-                break;
-            default:
-                fatal(rc::INVALID_FILE, "Transfer function {} used by input file \"{}\" is not supported by KTX. "
-                    "Use --assign-oetf to specify a different one.",
-                    toString(spec.format().transfer()), in.filename());
-            }
-        } else if (spec.format().iccProfileName().size()) {
-            fatal(rc::INVALID_FILE,
-                "Input file \"{}\" contains unsupported ICC profile \"{}\". Use --assign-oetf to specify a different one.",
-                in.filename(), spec.format().iccProfileName());
-        } else if (spec.format().oeGamma() > 0.0f) {
-            if (spec.format().oeGamma() > .45450f && spec.format().oeGamma() < .45460f) {
-                // N.B The previous loader matched oeGamma .45455 to the sRGB
-                // OETF and did not do an OETF transformation. In this loader
-                // we decode and reencode. Previous behavior can be obtained
-                // with the --assign_oetf option to toktx.
-                //
-                // This change results in 1 bit differences in the LSB of
-                // some color values noticeable only when directly comparing
-                // images produced before and after this change of loader.
-                warning("Converting gamma 2.2f to sRGB. Use --assign-oetf srgb to force treating input as sRGB.");
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionGamma>(spec.format().oeGamma());
-            } else if (spec.format().oeGamma() == 1.0) {
-                colorSpaceInfo.usedInputTransferFunction = KHR_DF_TRANSFER_LINEAR;
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionLinear>();
-            } else if (spec.format().oeGamma() > 0.0f) {
-                // We allow any gamma, there is not really a reason why we could not allow such input
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionGamma>(spec.format().oeGamma());
-            } else if (spec.format().oeGamma() == 0.0f) {
-                if (!in.formatName().compare("png")) {
-                    // If 8-bit, treat as sRGB, otherwise treat as linear.
-                    if (spec.format().channelBitLength() == 8) {
-                        colorSpaceInfo.usedInputTransferFunction = KHR_DF_TRANSFER_SRGB;
-                        colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionSRGB>();
-                    } else {
-                        colorSpaceInfo.usedInputTransferFunction = KHR_DF_TRANSFER_LINEAR;
-                        colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionLinear>();
-                    }
-                    warning("Ignoring reported gamma of 0.0f in {}-bit PNG input file \"{}\". Handling as {}.",
-                        spec.format().channelBitLength(), in.filename(), toString(colorSpaceInfo.usedInputTransferFunction));
-                } else {
-                    fatal(rc::INVALID_FILE,
-                        "Input file \"{}\" has gamma 0.0f. Use --assign-oetf to specify transfer function.");
-                }
-            } else {
-                if (!options.convertOETF.has_value()) {
-                    fatal(rc::INVALID_FILE, "Gamma {} not automatically supported by KTX. Specify handing with "
-                        "--convert-oetf or --assign-oetf.");
-                }
-            }
-        } else if (!in.formatName().compare("png")) {
-            // If 8-bit, treat as sRGB, otherwise treat as linear.
-            if (spec.format().channelBitLength() == 8) {
-                colorSpaceInfo.usedInputTransferFunction = KHR_DF_TRANSFER_SRGB;
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionSRGB>();
-            } else {
-                colorSpaceInfo.usedInputTransferFunction = KHR_DF_TRANSFER_LINEAR;
-                colorSpaceInfo.srcTransferFunction = std::make_unique<TransferFunctionLinear>();
-            }
-            warning("No transfer function can be determined from {}-bit PNG input file \"{}\", defaulting to {}. Use --assign-oetf to override.",
-                spec.format().channelBitLength(), in.filename(), toString(colorSpaceInfo.usedInputTransferFunction));
-        }
+        target.format().setPrimaries(colorSpaceInfo.src.usedPrimaries);
     }
 
-    if (options.convertOETF.has_value()) {
-        target.format().setTransfer(options.convertOETF.value());
+    // target transfer is set from the --format value or --assignTF or --convertTF.
+    if (options.assignTF.has_value())
+        target.format().setTransfer(options.assignTF.value());
+
+    if (options.convertTF.has_value())
+        target.format().setTransfer(options.convertTF.value());
+
+    switch (target.format().transfer()) {
+    case KHR_DF_TRANSFER_LINEAR:
+        colorSpaceInfo.dst.transferFunction = std::make_unique<TransferFunctionLinear>();
+        break;
+    case KHR_DF_TRANSFER_SRGB:
+        colorSpaceInfo.dst.transferFunction = std::make_unique<TransferFunctionSRGB>();
+        break;
+    default:
+        // Lack of will be handled if color transformation attempted.
+        colorSpaceInfo.dst.transferFunction = nullptr;
     }
+}
 
-    // Need to do color conversion if either the transfer functions don't match or the primaries
-    if (target.format().transfer() != colorSpaceInfo.usedInputTransferFunction ||
-        target.format().primaries() != colorSpaceInfo.usedInputPrimaries) {
-        if (colorSpaceInfo.srcTransferFunction == nullptr)
-            fatal(rc::INVALID_FILE,
-                "No transfer function can be determined from input file \"{}\". Use --assign-oetf to specify one.", in.filename());
+void CommandCreate::determineSourceOrigin(const ImageInput& in, ImageSpec::Origin& usedSourceOrigin) {
 
-        switch (target.format().transfer()) {
-        case KHR_DF_TRANSFER_LINEAR:
-            colorSpaceInfo.dstTransferFunction = std::make_unique<TransferFunctionLinear>();
-            break;
-        case KHR_DF_TRANSFER_SRGB:
-            colorSpaceInfo.dstTransferFunction = std::make_unique<TransferFunctionSRGB>();
-            break;
-        default:
-            assert(false);
-            break;
+    if (options.assignTexcoordOrigin.has_value()) {
+        usedSourceOrigin = options.assignTexcoordOrigin.value();
+    } else {
+        usedSourceOrigin = in.spec().origin();
+    }
+}
+
+void CommandCreate::determineTargetOrigin(const ImageInput& in, ImageSpec& target,
+                                          ImageSpec::Origin& usedSourceOrigin) {
+    determineSourceOrigin(in, usedSourceOrigin);
+    target.setOrigin(usedSourceOrigin);
+
+    if (options.convertTexcoordOrigin.has_value()) {
+        if (usedSourceOrigin.unspecified()) {
+            fatal(rc::INVALID_FILE, "Cannot convert texcoord origin as no information about the origin "
+                "is available in the input file \"{}\". Use --{} to specify one.",
+                in.filename(), OptionsCreate::kAssignTexcoordOrigin);
+        } else if (options.convertTexcoordOrigin.value() != usedSourceOrigin) {
+            target.setOrigin(options.convertTexcoordOrigin.value());
         }
     }
 }
@@ -2098,18 +2828,18 @@ void CommandCreate::checkSpecsMatch(const ImageInput& currentFile, const ImageSp
     const FormatDescriptor& currentFormat = currentFile.spec().format();
 
     if (currentFormat.transfer() != firstFormat.transfer()) {
-        if (options.assignOETF.has_value()) {
+        if (options.assignTF.has_value()) {
             warning("Input image \"{}\" has different transfer function ({}) than the first image ({})"
-                " but will be treated identically as specified by the --assign-oetf option.",
+                " but will be treated identically as specified by the --assign-tf option.",
                 currentFile.filename(), toString(currentFormat.transfer()), toString(firstFormat.transfer()));
-        } else if (options.convertOETF.has_value()) {
+        } else if (options.convertTF.has_value()) {
             warning("Input image \"{}\" has different transfer function ({}) than the first image ({})"
                 " and thus will go through different transfer function conversion to the target transfer"
-                " function specified by the --convert-oetf option.",
+                " function specified by the --convert-tf option.",
                 currentFile.filename(), toString(currentFormat.transfer()), toString(firstFormat.transfer()));
         } else {
             fatal(rc::INVALID_FILE, "Input image \"{}\" has different transfer function ({}) than the first image ({})."
-                " Use --assign-oetf or --convert-oetf to specify handling and stop this error.",
+                " Use --assign-tf or --convert-tf to specify handling and stop this error.",
                 currentFile.filename(), toString(currentFormat.transfer()), toString(firstFormat.transfer()));
         }
     }
@@ -2117,18 +2847,18 @@ void CommandCreate::checkSpecsMatch(const ImageInput& currentFile, const ImageSp
     if (currentFormat.oeGamma() != firstFormat.oeGamma()) {
         auto currentGamma = currentFormat.oeGamma() != -1 ? std::to_string(currentFormat.oeGamma()) : "no gamma";
         auto firstGamma = firstFormat.oeGamma() != -1 ? std::to_string(firstFormat.oeGamma()) : "no gamma";
-        if (options.assignOETF.has_value()) {
+        if (options.assignTF.has_value()) {
             warning("Input image \"{}\" has different gamma ({}) than the first image ({})"
-                " but will be treated identically as specified by the --assign-oetf option.",
+                " but will be treated identically as specified by the --assign-tf option.",
                 currentFile.filename(), currentGamma, firstGamma);
-        } else if (options.convertOETF.has_value()) {
+        } else if (options.convertTF.has_value()) {
             warning("Input image \"{}\" has different gamma ({}) than the first image ({})"
                 " and thus will go through different transfer function conversion to the target transfer"
-                " function specified by the --convert-oetf option.",
+                " function specified by the --convert-tf option.",
                 currentFile.filename(), currentGamma, firstGamma);
         } else {
             fatal(rc::INVALID_FILE, "Input image \"{}\" has different gamma ({}) than the first image ({})."
-                " Use --assign-oetf or --convert-oetf to specify handling and stop this error.",
+                " Use --assign-tf or --convert-tf to specify handling and stop this error.",
                 currentFile.filename(), currentGamma, firstGamma);
         }
     }
@@ -2152,6 +2882,23 @@ void CommandCreate::checkSpecsMatch(const ImageInput& currentFile, const ImageSp
 
     if (currentFormat.channelCount() != firstFormat.channelCount()) {
         warning("Input image \"{}\" has a different component count than the first image.", currentFile.filename());
+    }
+
+    if (currentFile.spec().origin() != firstSpec.origin()) {
+        if (options.assignTexcoordOrigin.has_value()) {
+            warning("Input image \"{}\" has different texcoord origin ({}) than the first image ({})"
+                " but will be treated identically as specified by the --assign-texcoord-origin option.",
+                currentFile.filename(), toString(currentFile.spec().origin()), toString(firstSpec.origin()));
+        } else if (options.convertTexcoordOrigin.has_value()) {
+            warning("Input image \"{}\" has different texcoord origin ({}) than the first image ({})"
+                " and thus will go through different origin conversion to the target origin"
+                " specified by the --convert-texcoord-origin option.",
+                currentFile.filename(), toString(currentFile.spec().origin()), toString(firstSpec.origin()));
+        } else {
+            fatal(rc::INVALID_FILE, "Input image \"{}\" has different texcoord origin ({}) than the first image ({})."
+                " Use --assign-texcoord-origin or --convert-texcoord-origin to specify handling and stop this error.",
+                currentFile.filename(), toString(currentFile.spec().origin()), toString(firstSpec.origin()));
+        }
     }
 }
 

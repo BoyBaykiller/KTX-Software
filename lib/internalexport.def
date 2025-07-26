@@ -46,7 +46,7 @@ EXPORTS
     ktxTexture2_GetImageSize
     ktxTexture2_calcLevelOffset
     ktxTexture2_destruct
-    reconstructDFDBytesPlane0FromSamples
+    reconstructDFDBytesPlanesFromSamples
     stringToVkFormat
     vk2dfd
     vkFormatString

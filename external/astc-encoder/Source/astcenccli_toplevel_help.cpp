@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // ----------------------------------------------------------------------------
-// Copyright 2011-2022 Arm Limited
+// Copyright 2011-2024 Arm Limited
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not
 // use this file except in compliance with the License. You may obtain a copy
@@ -158,6 +158,18 @@ COMPRESSION
        There are a number of additional compressor options which are useful
        to consider for common usage, based on the type of image data being
        compressed.
+
+       -decode_unorm8
+           Indicate that an LDR compressed texture will be used with
+           the decode_unorm8 extension behavior, instead of the default
+           decode_float16 decompression.
+
+           Matching the decode mode used during compression to the mode
+           used at runtime will improve image quality as the compressor
+           can ensure that rounding goes the right way.
+
+           This mode is used automatically if you decompress to an 8-bit
+           per component output image format.
 
        -normal
            The input texture is a three component linear LDR normal map
@@ -548,6 +560,10 @@ void astcenc_print_header()
 	const char* simdtype = "sse4.1";
 #elif (ASTCENC_SSE == 20)
 	const char* simdtype = "sse2";
+#elif (ASTCENC_SVE == 8)
+	const char* simdtype = "sve.256b";
+#elif (ASTCENC_SVE == 4)
+	const char* simdtype = "sve.128b";
 #elif (ASTCENC_NEON == 1)
 	const char* simdtype = "neon";
 #else
@@ -569,6 +585,14 @@ void astcenc_print_header()
 	unsigned int bits = static_cast<unsigned int>(sizeof(void*) * 8);
 	printf(astcenc_copyright_string,
 	       VERSION_STRING, bits, simdtype, pcnttype, f16ctype, YEAR_STRING);
+
+    // If possible, print hint that 8-wide SVE could be used
+#if ASTCENC_SVE == 4
+    if (svcntw() == 8)
+    {
+        printf("Note: This CPU can support 256-bit SVE builds.\n");
+    }
+#endif
 }
 
 /* See header for documentation. */

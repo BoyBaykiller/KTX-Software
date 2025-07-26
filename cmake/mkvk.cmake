@@ -62,6 +62,7 @@ if(NOT PERL_EXECUTABLE)
     message(FATAL_ERROR "Perl executable ${not_found_error}")
 endif()
 
+set(Ruby_FIND_VIRTUALENV FIRST)
 find_package(Ruby 3 QUIET)
 if(NOT Ruby_EXECUTABLE)
     message(FATAL_ERROR "Ruby v3 executable ${not_found_error}")
@@ -80,6 +81,7 @@ list(APPEND mkvkformatfiles_input
     scripts/mkvkformatfiles)
 list(APPEND mkvkformatfiles_output
     "${PROJECT_SOURCE_DIR}/interface/java_binding/src/main/java/org/khronos/ktx/VkFormat.java"
+    "${PROJECT_SOURCE_DIR}/interface/js_binding/vk_format.inl"
     "${PROJECT_SOURCE_DIR}/interface/python_binding/pyktx/vk_format.py"
     "${PROJECT_SOURCE_DIR}/lib/vkformat_enum.h"
     "${PROJECT_SOURCE_DIR}/lib/vkformat_typesize.c"

@@ -1,7 +1,15 @@
 # Copyright 2015-2020 The Khronos Group Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-find_package(Doxygen REQUIRED)
+# dot is optional as missing include dependency graphs and
+# inheritance graphs is not a big enough deal to justify
+# forcing people to install Graphviz.
+find_package(Doxygen REQUIRED OPTIONAL_COMPONENTS dot)
+if(NOT DOXYGEN_DOT_EXECUTABLE)
+    message(NOTICE "dot executable not found so Doxygen will not generate\n"
+                   "include dependency or inheritance graphs in the documentation.\n"
+                   "If you want these graphs, install Graphviz.")
+endif()
 
 set(docdest "${CMAKE_CURRENT_BINARY_DIR}/docs")
 
@@ -85,6 +93,8 @@ function( CreateDocLibKTX )
     set( DOXYGEN_EXPAND_ONLY_PREDEF YES )
 
     set( DOXYGEN_PREDEFINED
+    KTX_DOXYGEN_SKIP
+    KTX_FEATURE_WRITE
     "KTXTEXTURECLASSDEFN=class_id classId\; \\
         struct ktxTexture_vtbl* vtbl\;             \\
         struct ktxTexture_vvtbl* vvtbl\;           \\
@@ -117,7 +127,7 @@ function( CreateDocLibKTX )
         libktx.doc
         lib/libktx_mainpage.md
         include
-        lib/astc_encode.cpp
+        lib/astc_codec.cpp
         lib/basis_encode.cpp
         lib/basis_transcode.cpp
         lib/miniz_wrapper.cpp
@@ -200,7 +210,7 @@ function( CreateDocPyktxWrappers )
         COMMAND
             ${CMAKE_COMMAND} -E copy_directory ${KTX_BUILD_DIR}/interface/python_binding/docs/html/pyktx/html ${KTX_BUILD_DIR}/docs/html/pyktx
     )
-    add_dependencies( libktx.doc pyktx )
+    add_dependencies( libktx.doc pyktx.doc )
 endfunction()
 
 # ktxpkg.doc

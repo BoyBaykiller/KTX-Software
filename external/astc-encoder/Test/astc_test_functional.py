@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # -----------------------------------------------------------------------------
-# Copyright 2020-2023 Arm Limited
+# Copyright 2020-2025 Arm Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
 # use this file except in compliance with the License. You may obtain a copy
@@ -1403,7 +1403,8 @@ class CLIPTest(CLITestBase):
         self.exec(command)
 
         # Compute the first image using a file-based round-trip
-        command = [self.binary, "-cl", inputFile, p2CompFile, "4x4", "-medium"]
+        command = [self.binary, "-cl", inputFile, p2CompFile, "4x4", "-medium",
+                   "-decode_unorm8"]
         self.exec(command)
         command = [self.binary, "-dl", p2CompFile, p2DecFile]
         self.exec(command)
@@ -2182,7 +2183,7 @@ def main():
 
     parser = argparse.ArgumentParser()
 
-    coders = ["none", "neon", "sse2", "sse4.1", "avx2"]
+    coders = ["none", "neon", "sve_128", "sve_256", "sse2", "sse4.1", "avx2"]
     parser.add_argument("--encoder", dest="encoder", default="avx2",
                         choices=coders, help="test encoder variant")
     args = parser.parse_known_args()

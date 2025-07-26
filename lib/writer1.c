@@ -3,7 +3,7 @@
 
 /**
  * @internal
- * @file writer.c
+ * @file
  * @~English
  *
  * @brief Functions for creating KTX-format files from a set of images.
@@ -205,6 +205,9 @@ ktxTexture1_SetImageFromStdioStream(ktxTexture1* This, ktx_uint32_t level,
  * validation.
  *
  * @warning Do not use @c memcpy for this as it will not pad when necessary.
+ *
+ * @note The caller is responsible for freeing the original image memory
+ *       referred to by @p src.
  *
  * @param[in] This      pointer to the target ktxTexture object.
  * @param[in] level     mip level of the image to set.
@@ -536,7 +539,7 @@ ktxTexture1_WriteKTX2ToStream(ktxTexture1* This, ktxStream* dststr)
     ktx_uint32_t kvdLen;
     ktx_uint8_t* pKvd;
     ktx_uint32_t initialLevelPadLen;
-    ktxLevelIndexEntry* levelIndex;
+    ktxLevelIndexEntry* levelIndex = NULL;
     ktx_uint32_t levelIndexSize;
     ktx_uint32_t offset;
     ktx_uint32_t requiredLevelAlignment;
@@ -571,8 +574,10 @@ ktxTexture1_WriteKTX2ToStream(ktxTexture1* This, ktxStream* dststr)
     offset = sizeof(header) + levelIndexSize;
 
     ktx_uint32_t* dfd = vk2dfd(header.vkFormat);
-    if (!dfd)
-        return KTX_UNSUPPORTED_TEXTURE_TYPE;
+    if (!dfd) {
+        result = KTX_UNSUPPORTED_TEXTURE_TYPE;
+        goto cleanup;
+    }
 
     header.dataFormatDescriptor.byteOffset = offset;
     header.dataFormatDescriptor.byteLength = *dfd;
@@ -663,12 +668,12 @@ ktxTexture1_WriteKTX2ToStream(ktxTexture1* This, ktxStream* dststr)
     // write header and indices
     result = dststr->write(dststr, &header, sizeof(header), 1);
     if (result != KTX_SUCCESS)
-        return result;
+        goto cleanup;
 
     // write level index
     result = dststr->write(dststr, levelIndex, levelIndexSize, 1);
     if (result != KTX_SUCCESS)
-        return result;
+        goto cleanup;
 
    // write data format descriptor
    result = dststr->write(dststr, dfd, 1, *dfd);
@@ -680,7 +685,7 @@ ktxTexture1_WriteKTX2ToStream(ktxTexture1* This, ktxStream* dststr)
         result = dststr->write(dststr, pKvd, 1, kvdLen);
         free(pKvd);
         if (result != KTX_SUCCESS) {
-             return result;
+             goto cleanup;
         }
     }
 
@@ -690,7 +695,7 @@ ktxTexture1_WriteKTX2ToStream(ktxTexture1* This, ktxStream* dststr)
     if (initialLevelPadLen) {
         result = dststr->write(dststr, padding, 1, initialLevelPadLen);
         if (result != KTX_SUCCESS) {
-             return result;
+             goto cleanup;
         }
     }
 

@@ -11,7 +11,7 @@
 
 /**
  * @internal
- * @file LoadTests.h
+ * @file
  * @~English
  *
  * @brief Definition of app for running a set of OpenGL load tests.
@@ -54,7 +54,7 @@ class GLLoadTests : public GLAppSDL {
         eBack
     };
     void invokeSample(Direction dir);
-    LoadTestSample* showFile(std::string& filename);
+    LoadTestSample* showFile(const std::string& filename);
     LoadTestSample* pCurSample;
 
     bool quit = false;

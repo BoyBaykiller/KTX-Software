@@ -1,6 +1,6 @@
 #  SPDX-License-Identifier: Apache-2.0
 #  ----------------------------------------------------------------------------
-#  Copyright 2020-2023 Arm Limited
+#  Copyright 2020-2025 Arm Limited
 #
 #  Licensed under the Apache License, Version 2.0 (the "License"); you may not
 #  use this file except in compliance with the License. You may obtain a copy
@@ -15,34 +15,11 @@
 #  under the License.
 #  ----------------------------------------------------------------------------
 
-if(${ASTCENC_UNIVERSAL_BUILD})
-    set(ASTCENC_TARGET astc${ASTCENC_CODEC})
-else()
-    set(ASTCENC_TARGET astc${ASTCENC_CODEC}-${ASTCENC_ISA_SIMD})
-endif()
+set(ASTCENC_TARGET astc${ASTCENC_CODEC}-${ASTCENC_ISA_SIMD})
 
 project(${ASTCENC_TARGET})
 
-# On CMake 3.25 or older CXX_COMPILER_FRONTEND_VARIANT is not always set
-if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "")
-    set(CMAKE_CXX_COMPILER_FRONTEND_VARIANT "${CMAKE_CXX_COMPILER_ID}")
-endif()
-
-# Compiler accepts MSVC-style command line options
-set(is_msvc_fe "$<STREQUAL:${CMAKE_CXX_COMPILER_FRONTEND_VARIANT},MSVC>")
-# Compiler accepts GNU-style command line options
-set(is_gnu_fe1 "$<STREQUAL:${CMAKE_CXX_COMPILER_FRONTEND_VARIANT},GNU>")
-# Compiler accepts AppleClang-style command line options, which is also GNU-style
-set(is_gnu_fe2 "$<STREQUAL:${CMAKE_CXX_COMPILER_FRONTEND_VARIANT},AppleClang>")
-# Compiler accepts GNU-style command line options
-set(is_gnu_fe "$<OR:${is_gnu_fe1},${is_gnu_fe2}>")
-
-# Compiler is Visual Studio cl.exe
-set(is_msvccl "$<AND:${is_msvc_fe},$<CXX_COMPILER_ID:MSVC>>")
-# Compiler is Visual Studio clangcl.exe
-set(is_clangcl "$<AND:${is_msvc_fe},$<CXX_COMPILER_ID:Clang>>")
-# Compiler is upstream clang with the standard frontend
-set(is_clang "$<AND:${is_gnu_fe},$<CXX_COMPILER_ID:Clang,AppleClang>>")
+include(cmake_compiler.cmake)
 
 add_library(${ASTCENC_TARGET}-static
     STATIC
@@ -109,8 +86,13 @@ endif()
 if(${ASTCENC_CLI})
     # Veneer is compiled without any extended ISA so we can safely do
     # ISA compatability checks without triggering a SIGILL
-    add_library(${ASTCENC_TARGET}-veneer
+    add_library(${ASTCENC_TARGET}-veneer1
         astcenccli_entry.cpp)
+
+    # Veneer is compiled with extended ISA but without vector length overrides
+    # so we can safely do SVE vector length compatability checks
+    add_library(${ASTCENC_TARGET}-veneer2
+        astcenccli_entry2.cpp)
 
     add_executable(${ASTCENC_TARGET}
         astcenccli_error_metrics.cpp
@@ -123,11 +105,12 @@ if(${ASTCENC_CLI})
 
     target_link_libraries(${ASTCENC_TARGET}
         PRIVATE
-            ${ASTCENC_TARGET}-veneer
+            ${ASTCENC_TARGET}-veneer1
+            ${ASTCENC_TARGET}-veneer2
             ${ASTCENC_TARGET}-static)
 endif()
 
-macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
+macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_VENEER_TYPE)
 
     target_compile_features(${ASTCENC_TARGET_NAME}
         PRIVATE
@@ -162,13 +145,14 @@ macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
 
             # MSVC compiler defines
             $<${is_msvc_fe}:/EHsc>
+            $<$<AND:$<BOOL:${ASTCENC_WERROR}>,${is_msvc_fe}>:/WX>
             $<${is_msvccl}:/wd4324>
 
             # G++ and Clang++ compiler defines
             $<${is_gnu_fe}:-Wall>
             $<${is_gnu_fe}:-Wextra>
             $<${is_gnu_fe}:-Wpedantic>
-            $<${is_gnu_fe}:-Werror>
+            $<$<AND:$<BOOL:${ASTCENC_WERROR}>,${is_gnu_fe}>:-Werror>
             $<${is_gnu_fe}:-Wshadow>
             $<${is_gnu_fe}:-Wdouble-promotion>
             $<${is_clang}:-Wdocumentation>
@@ -180,6 +164,7 @@ macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
             $<${is_gnu_fe}:-Wno-float-equal>
             $<${is_gnu_fe}:-Wno-deprecated-declarations>
             $<${is_gnu_fe}:-Wno-atomic-implicit-seq-cst>
+            $<${is_clang}:-Wno-overriding-option>
 
             # Clang 10 also throws up warnings we need to investigate (ours)
             $<${is_gnu_fe}:-Wno-cast-align>
@@ -209,6 +194,16 @@ macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
         target_link_options(${ASTCENC_TARGET_NAME}
             PRIVATE
                 $<${is_clang}:-fsanitize=address>)
+    endif()
+
+    if(${ASTCENC_UBSAN})
+        target_compile_options(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                $<${is_clang}:-fsanitize=undefined>)
+
+        target_link_options(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                $<${is_clang}:-fsanitize=undefined>)
     endif()
 
     if(NOT ${ASTCENC_INVARIANCE})
@@ -262,26 +257,30 @@ macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
 
     # Set up configuration for SIMD ISA builds
     if(${ASTCENC_ISA_SIMD} MATCHES "none")
-        if(NOT ${ASTCENC_UNIVERSAL_BUILD})
+        target_compile_definitions(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                ASTCENC_NEON=0
+                ASTCENC_SVE=0
+                ASTCENC_SSE=0
+                ASTCENC_AVX=0
+                ASTCENC_POPCNT=0
+                ASTCENC_F16C=0)
+
+        if(${ASTCENC_BIG_ENDIAN})
             target_compile_definitions(${ASTCENC_TARGET_NAME}
                 PRIVATE
-                    ASTCENC_NEON=0
-                    ASTCENC_SSE=0
-                    ASTCENC_AVX=0
-                    ASTCENC_POPCNT=0
-                    ASTCENC_F16C=0)
+                    ASTCENC_BIG_ENDIAN=1)
         endif()
 
     elseif(${ASTCENC_ISA_SIMD} MATCHES "neon")
-        if(NOT ${ASTCENC_UNIVERSAL_BUILD})
-            target_compile_definitions(${ASTCENC_TARGET_NAME}
-                PRIVATE
-                    ASTCENC_NEON=1
-                    ASTCENC_SSE=0
-                    ASTCENC_AVX=0
-                    ASTCENC_POPCNT=0
-                    ASTCENC_F16C=0)
-        endif()
+        target_compile_definitions(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                ASTCENC_NEON=1
+                ASTCENC_SVE=0
+                ASTCENC_SSE=0
+                ASTCENC_AVX=0
+                ASTCENC_POPCNT=0
+                ASTCENC_F16C=0)
 
         # Workaround MSVC codegen bug for NEON builds on VS 2022 17.2 or older
         # https://developercommunity.visualstudio.com/t/inlining-turns-constant-into-register-operand-for/1394798
@@ -291,16 +290,65 @@ macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
                     $<${is_msvccl}:/d2ssa-cfg-sink->)
         endif()
 
-    elseif((${ASTCENC_ISA_SIMD} MATCHES "sse2") OR (${ASTCENC_UNIVERSAL_BUILD} AND ${ASTCENC_ISA_SSE2}))
-        if(NOT ${ASTCENC_UNIVERSAL_BUILD})
-            target_compile_definitions(${ASTCENC_TARGET_NAME}
+    elseif(${ASTCENC_ISA_SIMD} MATCHES "sve_256")
+        target_compile_definitions(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                ASTCENC_NEON=1
+                ASTCENC_SVE=8
+                ASTCENC_SSE=0
+                ASTCENC_AVX=0
+                ASTCENC_POPCNT=0
+                ASTCENC_F16C=0)
+
+        # Enable SVE in the core library
+        if (NOT ${ASTCENC_VENEER_TYPE})
+            target_compile_options(${ASTCENC_TARGET_NAME}
                 PRIVATE
-                    ASTCENC_NEON=0
-                    ASTCENC_SSE=20
-                    ASTCENC_AVX=0
-                    ASTCENC_POPCNT=0
-                    ASTCENC_F16C=0)
+                    -march=armv8-a+sve -msve-vector-bits=256)
+
+        # Enable SVE without fixed vector length in the veneer
+        elseif (${ASTCENC_VENEER_TYPE} EQUAL 2)
+            target_compile_options(${ASTCENC_TARGET_NAME}
+                PRIVATE
+                    -march=armv8-a+sve)
         endif()
+
+    elseif(${ASTCENC_ISA_SIMD} MATCHES "sve_128")
+        target_compile_definitions(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                ASTCENC_NEON=1
+                ASTCENC_SVE=4
+                ASTCENC_SSE=0
+                ASTCENC_AVX=0
+                ASTCENC_POPCNT=0
+                ASTCENC_F16C=0)
+
+        # Enable SVE in the core library
+        # Note that for 128-bit SVE the generated code is actually
+        # vector-length agnostic, but any manual intrinsics used in the
+        # enhanced-NEON library use 128-bit data width predicates
+        if (NOT ${ASTCENC_VENEER_TYPE})
+            target_compile_options(${ASTCENC_TARGET_NAME}
+                PRIVATE
+                    -march=armv8-a+sve)
+
+        # Enable SVE without fixed vector length in the veneer
+        elseif (${ASTCENC_VENEER_TYPE} EQUAL 2)
+            target_compile_options(${ASTCENC_TARGET_NAME}
+                PRIVATE
+                    -march=armv8-a+sve)
+        endif()
+
+    elseif(${ASTCENC_ISA_SIMD} MATCHES "sse2")
+        target_compile_definitions(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                ASTCENC_NEON=0
+                ASTCENC_SVE=0
+                ASTCENC_SSE=20
+                ASTCENC_AVX=0
+                ASTCENC_POPCNT=0
+                ASTCENC_F16C=0
+                ASTCENC_X86_GATHERS=0)
 
         # Force SSE2 on AppleClang (normally SSE4.1 is the default)
         target_compile_options(${ASTCENC_TARGET_NAME}
@@ -310,18 +358,18 @@ macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
                 $<${is_gnu_fe}:-mno-sse4.1>
                 $<${is_gnu_fe}:-Wno-unused-command-line-argument>)
 
-    elseif((${ASTCENC_ISA_SIMD} MATCHES "sse4.1") OR (${ASTCENC_UNIVERSAL_BUILD} AND ${ASTCENC_ISA_SSE41}))
-        if(NOT ${ASTCENC_UNIVERSAL_BUILD})
-            target_compile_definitions(${ASTCENC_TARGET_NAME}
-                PRIVATE
-                    ASTCENC_NEON=0
-                    ASTCENC_SSE=41
-                    ASTCENC_AVX=0
-                    ASTCENC_POPCNT=1
-                    ASTCENC_F16C=0)
-        endif()
+    elseif(${ASTCENC_ISA_SIMD} MATCHES "sse4.1")
+        target_compile_definitions(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                ASTCENC_NEON=0
+                ASTCENC_SVE=0
+                ASTCENC_SSE=41
+                ASTCENC_AVX=0
+                ASTCENC_POPCNT=1
+                ASTCENC_F16C=0
+                ASTCENC_X86_GATHERS=0)
 
-        if (${ASTCENC_IS_VENEER})
+        if (${ASTCENC_VENEER_TYPE} GREATER 0)
             # Force SSE2 on AppleClang (normally SSE4.1 is the default)
             target_compile_options(${ASTCENC_TARGET_NAME}
                 PRIVATE
@@ -336,18 +384,21 @@ macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
                     $<${is_gnu_fe}:-Wno-unused-command-line-argument>)
         endif()
 
-    elseif((${ASTCENC_ISA_SIMD} MATCHES "avx2") OR (${ASTCENC_UNIVERSAL_BUILD} AND ${ASTCENC_ISA_AVX2}))
-        if(NOT ${ASTCENC_UNIVERSAL_BUILD})
-            target_compile_definitions(${ASTCENC_TARGET_NAME}
-                PRIVATE
-                    ASTCENC_NEON=0
-                    ASTCENC_SSE=41
-                    ASTCENC_AVX=2
-                    ASTCENC_POPCNT=1
-                    ASTCENC_F16C=1)
-        endif()
+    elseif(${ASTCENC_ISA_SIMD} MATCHES "avx2")
+        # Gathers are quite slow on many x86 microarchitectures, to the point where
+        # it can be significantly faster to just avoid them use scalar loads.
 
-        if (${ASTCENC_IS_VENEER})
+        target_compile_definitions(${ASTCENC_TARGET_NAME}
+            PRIVATE
+                ASTCENC_NEON=0
+                ASTCENC_SVE=0
+                ASTCENC_SSE=41
+                ASTCENC_AVX=2
+                ASTCENC_X86_GATHERS=$<BOOL:${ASTCENC_X86_GATHERS}>
+                ASTCENC_POPCNT=1
+                ASTCENC_F16C=1)
+
+        if (${ASTCENC_VENEER_TYPE} GREATER 0)
             # Force SSE2 on AppleClang (normally SSE4.1 is the default)
             target_compile_options(${ASTCENC_TARGET_NAME}
                 PRIVATE
@@ -369,18 +420,34 @@ macro(astcenc_set_properties ASTCENC_TARGET_NAME ASTCENC_IS_VENEER)
         # which significantly improve performance. Note that this DOES reduce
         # image quality by up to 0.2 dB (normally much less), but buys an
         # average of 10-15% performance improvement ...
-        if((NOT ${ASTCENC_INVARIANCE}) AND (NOT ${ASTCENC_IS_VENEER}))
+        if((NOT ${ASTCENC_INVARIANCE}) AND (NOT ${ASTCENC_VENEER_TYPE}))
             target_compile_options(${ASTCENC_TARGET_NAME}
                 PRIVATE
                     $<${is_gnu_fe}:-mfma>)
         endif()
 
+    elseif(${ASTCENC_ISA_SIMD} MATCHES "native")
+        target_compile_definitions(${ASTCENC_TARGET_NAME}
+            PRIVATE)
+
+        if (${ASTCENC_VENEER_TYPE} GREATER 0)
+            target_compile_options(${ASTCENC_TARGET_NAME}
+                PRIVATE
+                    $<${is_gnu_fe}:-Wno-unused-command-line-argument>)
+        else()
+            target_compile_options(${ASTCENC_TARGET_NAME}
+                PRIVATE
+                    $<${is_clangcl}:-mcpu=native -march=native>
+                    $<${is_gnu_fe}:-mcpu=native -march=native>
+                    $<${is_gnu_fe}:-Wno-unused-command-line-argument>)
+        endif()
     endif()
 
 endmacro()
 
 string(CONCAT EXTERNAL_CXX_FLAGS
        " $<${is_gnu_fe}: -fno-strict-aliasing>"
+       " $<${is_gnu_fe}: -Wno-pedantic>"
        " $<${is_gnu_fe}: -Wno-unused-parameter>"
        " $<${is_gnu_fe}: -Wno-old-style-cast>"
        " $<${is_gnu_fe}: -Wno-double-promotion>"
@@ -421,17 +488,26 @@ if(${ASTCENC_SHAREDLIB})
         PRIVATE
             $<${is_gnu_fe}:-fvisibility=hidden>
             $<${is_msvc_fe}:/W4>)
+
+    if(NOT ${ASTCENC_UNIVERSAL_BUILD})
+        install(TARGETS ${ASTCENC_TARGET}-shared)
+    endif()
 endif()
 
 if(${ASTCENC_CLI})
-    astcenc_set_properties(${ASTCENC_TARGET}-veneer ON)
-    astcenc_set_properties(${ASTCENC_TARGET} OFF)
+    astcenc_set_properties(${ASTCENC_TARGET}-veneer1 1)
+    astcenc_set_properties(${ASTCENC_TARGET}-veneer2 2)
+    astcenc_set_properties(${ASTCENC_TARGET} 0)
 
-    target_compile_options(${ASTCENC_TARGET}
+    target_compile_options(${ASTCENC_TARGET}-veneer1
         PRIVATE
             $<${is_msvc_fe}:/W3>)
 
-    target_compile_options(${ASTCENC_TARGET}-veneer
+    target_compile_options(${ASTCENC_TARGET}-veneer2
+        PRIVATE
+            $<${is_msvc_fe}:/W3>)
+
+    target_compile_options(${ASTCENC_TARGET}
         PRIVATE
             $<${is_msvc_fe}:/W3>)
 
@@ -446,9 +522,7 @@ if(${ASTCENC_CLI})
         PRIVATE
             ${CMAKE_CURRENT_BINARY_DIR})
 
-    install(TARGETS ${ASTCENC_TARGET} DESTINATION ${PACKAGE_ROOT})
-endif()
-
-if(${ASTCENC_SHAREDLIB})
-    install(TARGETS ${ASTCENC_TARGET}-shared DESTINATION ${PACKAGE_ROOT})
+    if(NOT ${ASTCENC_UNIVERSAL_BUILD})
+        install(TARGETS ${ASTCENC_TARGET})
+    endif()
 endif()

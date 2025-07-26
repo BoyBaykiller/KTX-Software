@@ -1,4 +1,5 @@
 # Editor and engineering scratch files
+.cache
 .vs
 .vscode
 .DS_Store
@@ -30,6 +31,7 @@ Test/Images/Scratch*
 # Test output
 TestOutput
 /*.xlsx
+/*.jpg
 /*.json
 /*.log
 /*.txt
@@ -40,3 +42,6 @@ TestOutput
 astc_reference-main*
 Docs/Profiling.md
 Source/astcenccli_version.h
+
+# Do not ignore workflows
+!.github/workflows/

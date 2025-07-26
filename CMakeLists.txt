@@ -22,14 +22,6 @@ if(POLICY CMP0149)
     cmake_policy(SET CMP0149 NEW)
 endif()
 
-project(KTX-Software
-    VERSION ${KTX_VERSION}
-    DESCRIPTION "Libraries and tools to create and read KTX image texture files."
-)
-
-include(CTest)
-
-include(GNUInstallDirs)
 include(CMakeDependentOption)
 
 include(cmake/codesign.cmake)
@@ -37,40 +29,25 @@ include(cmake/cputypetest.cmake)
 
 # OPTIONS
 
-if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "tvOS" OR CMAKE_SYSTEM_NAME STREQUAL "visionOS")
-    set( APPLE_LOCKED_OS ON )
+# N.B IOS and, in the Darwin case, CMAKE_SYSTEM_NAME are not set
+# until after the project() command. The latter is most strange.
+if(APPLE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "tvOS" OR CMAKE_SYSTEM_NAME STREQUAL "visionOS")
+        set( APPLE_LOCKED_OS ON )
+    else()
+        set( APPLE_MAC_OS ON )
+    endif()
 endif()
 
-if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set( APPLE_MAC_OS ON )
-endif()
-
-if(APPLE_LOCKED_OS OR EMSCRIPTEN)
-    set( LIB_TYPE_DEFAULT ON )
-else()
-    set( LIB_TYPE_DEFAULT OFF )
-endif()
-
-CMAKE_DEPENDENT_OPTION( KTX_FEATURE_TOOLS
-                        "Create KTX tools"
-                        ON
-                        "NOT APPLE_LOCKED_OS;NOT ANDROID;NOT EMSCRIPTEN"
-                        OFF
-)
 option( KTX_FEATURE_DOC "Create KTX documentation." OFF )
-option( KTX_FEATURE_STATIC_LIBRARY "Create static libraries (shared otherwise)." ${LIB_TYPE_DEFAULT} )
 option( KTX_FEATURE_JNI "Create Java bindings for libktx." OFF )
 option( KTX_FEATURE_PY "Create Python source distribution." OFF )
 option( KTX_FEATURE_TESTS "Create unit tests." ON )
 option( KTX_FEATURE_TOOLS_CTS "Enable KTX CLI Tools CTS tests (requires CTS submodule)." OFF )
-
 option( KTX_FEATURE_ETC_UNPACK "ETC decoding support." ON )
 
 if(KTX_FEATURE_TOOLS_CTS AND NOT KTX_FEATURE_TOOLS)
     message(WARNING "KTX_FEATURE_TOOLS is not set -> disabling KTX_FEATURE_TOOLS_CTS.")
-    set(KTX_FEATURE_TOOLS_CTS "OFF")
-elseif(KTX_FEATURE_TOOLS_CTS AND NOT KTX_FEATURE_TESTS)
-    message(WARNING "KTX_FEATURE_TESTS is not set -> disabling KTX_FEATURE_TOOLS_CTS.")
     set(KTX_FEATURE_TOOLS_CTS "OFF")
 endif()
 
@@ -80,39 +57,6 @@ if(POLICY CMP0127)
     # Seems the parens in the match string trigger the warning.
     cmake_policy(SET CMP0127 NEW)
 endif()
-set_target_processor_type(CPU_ARCHITECTURE)
-CMAKE_DEPENDENT_OPTION( BASISU_SUPPORT_SSE
-    "Compile with SSE support so applications can choose to use it."
-    ON
-    "NOT CMAKE_OSX_ARCHITECTURES STREQUAL \"$(ARCHS_STANDARD)\"; CPU_ARCHITECTURE STREQUAL x86_64 OR CPU_ARCHITECTURE STREQUAL x86"
-    OFF
-)
-CMAKE_DEPENDENT_OPTION( BASISU_SUPPORT_OPENCL
-    "Compile with OpenCL support so applications can choose to use it."
-    OFF
-    "OpenCL_FOUND OR WIN32"
-    OFF
-)
-
-if(BASISU_SUPPORT_OPENCL)
-    find_package(OpenCL)
-endif()
-
-if(BASISU_SUPPORT_OPENCL AND WIN32 AND NOT OpenCL_FOUND)
-    # To avoid fiddly setting up of OpenCL on Windows CI VMs, use copy in repo.
-    set(OpenCL_INCLUDE_DIR
-        "${CMAKE_CURRENT_SOURCE_DIR}/external/basisu/opencl"
-        # FORCE to override *-NOTFOUND set by the failed find.
-        CACHE PATH "" FORCE
-    )
-    set(OpenCL_LIBRARY
-        "${CMAKE_CURRENT_SOURCE_DIR}/external/basisu/opencl/lib/OpenCL64.lib"
-        CACHE FILEPATH "" FORCE
-    )
-    set(OpenCL_INCLUDE_DIRS ${OpenCL_INCLUDE_DIR})
-    set(OpenCL_LIBRARIES ${OpenCL_LIBRARY})
-endif()
-
 
 CMAKE_DEPENDENT_OPTION( KTX_EMBED_BITCODE
     "Embed bitcode in binaries."
@@ -136,15 +80,19 @@ set( KTX_FEATURE_LOADTEST_APPS
 set_property( CACHE KTX_FEATURE_LOADTEST_APPS
               PROPERTY STRINGS OFF OpenGL Vulkan OpenGL+Vulkan
 )
-if(WIN32 OR APPLE_MAC_OS)
-    CMAKE_DEPENDENT_OPTION( KTX_LOADTEST_APPS_USE_LOCAL_DEPENDENCIES
-        "Look for locally installed dependencies. Fail build if not found. When OFF use binaries from the KTX-Software repo, if available for the target processor. Useful when building for Windows arm64 using vcpkg packages."
-        OFF
-        KTX_FEATURE_LOADTEST_APPS
-        OFF
-    )
-else()
-    set( KTX_LOADTEST_APPS_USE_LOCAL_DEPENDENCIES ON )
+
+if(NOT KTX_FEATURE_LOADTEST_APPS MATCHES OFF)
+    set(VCPKG_MANIFEST_FEATURES loadtests)
+    if (KTX_FEATURE_LOADTEST_APPS MATCHES OpenGL)
+        list(APPEND VCPKG_MANIFEST_FEATURES glloadtests)
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # Explicitly set the triplet to avoid potential trouble.
+        # Automatic triplet selection in CI, which runs on x86_64, selects
+        # x64-ios, which is the simulator. Works locally on arm64 so
+        # presumably running on an x86_64 is the reason.
+        set(VCPKG_TARGET_TRIPLET arm64-ios)
+    endif()
 endif()
 
 option( KTX_GENERATE_VK_FILES
@@ -163,14 +111,15 @@ if(APPLE)
     set(PRODUCTBUILD_KEYCHAIN_PATH "" CACHE FILEPATH "pkgbuild keychain file")
     if(APPLE_LOCKED_OS)
         set(XCODE_PROVISIONING_PROFILE_SPECIFIER "" CACHE STRING "Xcode provisioning profile specifier")
-        set(MOLTENVK_SDK "$ENV{VULKAN_SDK}/../MoltenVK" CACHE STRING "MoltenVK directory inside the Vulkan SDK")
     endif()
 
     # Deployment
+    # When changing the target you must also edit the triplet files in
+    # vcpkg-triplets to reflect the new target.
     if(APPLE_MAC_OS)
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "10.11" CACHE STRING "macOS Deployment Target")
-    elseif(IOS OR CMAKE_SYSTEM_NAME STREQUAL "tvOS")
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "iOS/tvOS Deployment Target")
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "macOS Deployment Target")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "iOS/tvOS Deployment Target")
         set(CMAKE_XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH NO)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "visionOS")
         set(CMAKE_OSX_DEPLOYMENT_TARGET "1.0" CACHE STRING "visionOS Deployment Target")
@@ -241,13 +190,99 @@ if(WIN32)
         # KTX_DEPENDENT_VARIABLE won't work. Force disable signing.
         unset(CODE_SIGN_KEY_VAULT CACHE)
     endif()
-
-    # Windows Store Compatibility
-    if (${CMAKE_SYSTEM_NAME} STREQUAL "WindowsStore")
-        # Disable OpenGL upload on Universal Windows Platform
-        set(KTX_FEATURE_GL_UPLOAD OFF)
-    endif()
 endif()
+
+set(bitness 64)
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR FORCE32)
+        set(bitness 32)
+endif()
+
+option( KTX_WERROR "Make all warnings in KTX code into errors." OFF)
+
+# After most option settings so settings can be used to affect vcpkg.
+project(KTX-Software
+    VERSION ${KTX_VERSION}
+    DESCRIPTION "Libraries and tools to create and read KTX image texture files."
+)
+
+include(GNUInstallDirs) # Must be after project.
+include(CTest)          #           "
+
+set_target_processor_type(CPU_ARCHITECTURE) # Must be after project.
+if (CPU_ARCHITECTURE STREQUAL x86)
+    message(FATAL_ERROR "This project cannot be built for x86 cpu.")
+endif()
+CMAKE_DEPENDENT_OPTION( BASISU_SUPPORT_SSE
+    "Compile with SSE support so applications can choose to use it."
+    ON
+    "NOT CMAKE_OSX_ARCHITECTURES STREQUAL \"$(ARCHS_STANDARD)\"; CPU_ARCHITECTURE STREQUAL x86_64"
+    OFF
+)
+
+CMAKE_DEPENDENT_OPTION( BASISU_SUPPORT_OPENCL
+    "Compile with OpenCL support so applications can choose to use it."
+    OFF
+    "OpenCL_FOUND OR WIN32"
+    OFF
+)
+
+if(BASISU_SUPPORT_OPENCL)
+    find_package(OpenCL)  # Must be after project as needs language defined.
+endif()
+
+if(BASISU_SUPPORT_OPENCL AND WIN32 AND NOT OpenCL_FOUND)
+    # To avoid fiddly setting up of OpenCL on Windows CI VMs, use copy in repo.
+    set(OpenCL_INCLUDE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/basisu/opencl"
+        # FORCE to override *-NOTFOUND set by the failed find.
+        CACHE PATH "" FORCE
+    )
+    set(OpenCL_LIBRARY
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/basisu/opencl/lib/OpenCL64.lib"
+        CACHE FILEPATH "" FORCE
+    )
+    set(OpenCL_INCLUDE_DIRS ${OpenCL_INCLUDE_DIR})
+    set(OpenCL_LIBRARIES ${OpenCL_LIBRARY})
+endif()
+
+# Windows Store Compatibility.
+# In this case CMAKE_SYSTEM_NAME is not set until after project.
+if (${CMAKE_SYSTEM_NAME} STREQUAL "WindowsStore")
+    # Disable OpenGL upload on Universal Windows Platform
+    set(KTX_FEATURE_GL_UPLOAD OFF)
+endif()
+
+# Uses IOS, so included after project to avoid modifying it.
+if(KTX_GENERATE_VK_FILES)
+    include(cmake/mkvk.cmake)
+endif()
+
+# EMSCRIPTEN is not set until project so all these must be after.
+if(APPLE_LOCKED_OS OR ANDROID OR EMSCRIPTEN)
+    message(WARNING "Building unit tests for Android, Apple locked OSes or the web is not supported -> disabling KTX_FEATURE_TESTS.")
+    set(KTX_FEATURE_TESTS "OFF")
+endif()
+if(KTX_FEATURE_TOOLS_CTS AND NOT KTX_FEATURE_TESTS)
+    message(WARNING "KTX_FEATURE_TESTS is not set -> disabling KTX_FEATURE_TOOLS_CTS.")
+    set(KTX_FEATURE_TOOLS_CTS "OFF")
+endif()
+if(APPLE_LOCKED_OS OR EMSCRIPTEN)
+    set( LIB_TYPE_DEFAULT OFF )
+else()
+    set( LIB_TYPE_DEFAULT ON )
+endif()
+
+option(BUILD_SHARED_LIBS "Create shared libraries (static otherwise)." ${LIB_TYPE_DEFAULT} )
+
+# Used to reset BUILD_SHARED_LIBS after forcing static builds
+set(BUILD_SHARED_LIBS_RESET ${BUILD_SHARED_LIBS})
+
+CMAKE_DEPENDENT_OPTION( KTX_FEATURE_TOOLS
+                        "Create KTX tools"
+                        ON
+                        "NOT APPLE_LOCKED_OS;NOT ANDROID;NOT EMSCRIPTEN"
+                        OFF
+)
 
 if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN AND NOT ANDROID)
     set(LINUX TRUE)
@@ -257,29 +292,16 @@ if(EMSCRIPTEN)
     set( KTX_FEATURE_VK_UPLOAD OFF )
 endif()
 
-set(bitness 64)
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR FORCE32)
-        set(bitness 32)
-endif()
-
-if(KTX_FEATURE_STATIC_LIBRARY)
+if(NOT BUILD_SHARED_LIBS)
     set(LIB_TYPE STATIC)
 else()
-    if(IOS OR EMSCRIPTEN)
-        message(SEND_ERROR "Library type cannot be shared for the current platform. Set KTX_FEATURE_STATIC_LIBRARY to ON!")
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR EMSCRIPTEN)
+        message(SEND_ERROR "Library type cannot be shared for the current platform. Set BUILD_SHARED_LIBS to OFF!")
     endif()
     set(LIB_TYPE SHARED)
 endif()
 
-# Depends on the settings, so it must be included after
-if(KTX_GENERATE_VK_FILES)
-    include(cmake/mkvk.cmake)
-endif()
-
 # Global compile & link options including optimization flags
-
-option( KTX_WERROR "Make all warnings in KTX code into errors." OFF)
-
 if(MSVC)
     add_compile_options( /W4;$<$<BOOL:${KTX_WERROR}>:/WX> )
     add_compile_options( $<IF:$<CONFIG:Debug>,/Gz,/O2> )
@@ -304,14 +326,21 @@ endif()
 
 # For Visual Studio prior to 2022 (compiler < 19.30) /fp:strict
 # For Visual Studio 2022 (compiler >= 19.30) /fp:precise
-# For Visual Studio 2022 ClangCL seems to have accidentally enabled contraction by default,
-# so behaves differently to CL.exe. Use the -Xclang argument to workaround and allow access
-# GNU-style switch to control contraction and force disable.
+# For Visual Studio 2022 ClangCL has enabled contraction by default,
+# which is the same as standard clang, so behaves differently to
+# CL.exe. Use the -Xclang argument to access GNU-style switch to
+# control contraction and force disable.
 
 # On CMake 3.25 or older CXX_COMPILER_FRONTEND_VARIANT is not always set
 if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "")
     set(CMAKE_CXX_COMPILER_FRONTEND_VARIANT "${CMAKE_CXX_COMPILER_ID}")
 endif()
+
+#cmake_print_variables(
+#    CMAKE_CXX_COMPILER_ID
+#    CMAKE_CXX_COMPILER_VERSION
+#    CMAKE_CXX_COMPILER_FRONTEND_VARIANT
+#)
 
 # Compiler accepts MSVC-style command line options
 set(is_msvc_fe "$<STREQUAL:${CMAKE_CXX_COMPILER_FRONTEND_VARIANT},MSVC>")
@@ -321,6 +350,7 @@ set(is_gnu_fe1 "$<STREQUAL:${CMAKE_CXX_COMPILER_FRONTEND_VARIANT},GNU>")
 set(is_gnu_fe2 "$<STREQUAL:${CMAKE_CXX_COMPILER_FRONTEND_VARIANT},AppleClang>")
 # Compiler accepts GNU-style command line options
 set(is_gnu_fe "$<OR:${is_gnu_fe1},${is_gnu_fe2}>")
+#add_custom_target(debug_isgnufe1 COMMAND ${CMAKE_COMMAND} -E echo "is_gnufe1_exp = $<STREQUAL:${CMAKE_CXX_COMPILER_FRONTEND_VARIANT},GNU>")
 
 # Compiler is Visual Studio cl.exe
 set(is_msvccl "$<AND:${is_msvc_fe},$<CXX_COMPILER_ID:MSVC>>")
@@ -329,30 +359,25 @@ set(is_clangcl "$<AND:${is_msvc_fe},$<CXX_COMPILER_ID:Clang>>")
 # Compiler is upstream clang with the standard frontend
 set(is_clang "$<AND:${is_gnu_fe},$<CXX_COMPILER_ID:Clang,AppleClang>>")
 
-if(${is_msvccl} AND $<VERSION_LESS:$<CXX_COMPILER_VERSION>,19.30>)
-    add_compile_options(/fp:strict)
-endif()
-if(${is_msvccl} AND $<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,19.30>)
-    add_compile_options(/fp:precise)
-endif()
-if(${is_clangcl})
-    add_compile_options(/fp:precise)
-endif()
-if(${is_clangcl} AND $<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,14.0.0>)
-    add_compile_options(-Xclang -ffp-contract=off)
-endif()
-if(${is_clang} AND $<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,10.0.0>)
-    add_compile_options(-ffp-model=precise)
-endif()
-if(${is_gnu_fe})
-    add_compile_options(-ffp-contract=off)
-endif()
+add_compile_options(
+    $<$<AND:${is_msvccl},$<VERSION_LESS:$<CXX_COMPILER_VERSION>,19.30>>:/fp:strict>
+    $<$<AND:${is_msvccl},$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,19.30>>:/fp:precise>
+    $<${is_clangcl}:/fp:precise>
+    $<$<AND:${is_clangcl},$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,14.0.0>>:-Xclang$<SEMICOLON>-ffp-contract=off>
+    $<$<AND:${is_clang},$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,10.0.0>>:-ffp-model=precise>
+    $<${is_gnu_fe}:-ffp-contract=off>
+    # Hide noise from clang and clangcl 20 warning the 2nd fp option changes
+    # one of the settings made the first.
+    $<$<AND:${is_clang},$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,20.0.0>>:-Wno-overriding-option>
+)
+#add_custom_target(debug_gnufe_ffpcontract COMMAND ${CMAKE_COMMAND} -E echo "ffp_contract = $<${is_gnu_fe}:-ffp-contract=off>")
 
 set(KTX_BUILD_DIR "${CMAKE_BINARY_DIR}")
 
 set(KTX_MAIN_SRC
     include/KHR/khr_df.h
     include/ktx.h
+    lib/astc_codec.cpp
     lib/basis_sgd.h
     lib/basis_transcode.cpp
     lib/miniz_wrapper.cpp
@@ -400,15 +425,16 @@ set(KTX_MAIN_SRC
     lib/vkFormat2glInternalFormat.inl
     lib/vkFormat2glType.inl
     lib/vkformat_check.c
+    lib/vkformat_check_variant.c
     lib/vkformat_enum.h
     lib/vkformat_str.c
     lib/vkformat_typesize.c
     )
 
 if (KTX_FEATURE_ETC_UNPACK)
-	list(APPEND KTX_MAIN_SRC 
-		external/etcdec/etcdec.cxx
-	)
+    list(APPEND KTX_MAIN_SRC 
+        external/etcdec/etcdec.cxx
+    )
 endif()
 
 set(BASISU_ENCODER_CXX_SRC
@@ -460,17 +486,35 @@ if(KTX_FEATURE_GL_UPLOAD)
     )
 endif()
 
-if(WIN32)
+if(APPLE OR LINUX OR WIN32)
     # By wrapping in generator expression we force multi configuration
-    # generators (like Visual Studio) to take the exact path and not
-    # change it.
+    # generators (like Visual Studio, Xcode or Ninja multi-config) to
+    # take the exact path and not change it.
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY $<1:${KTX_BUILD_DIR}/$<CONFIG>>)
-elseif(APPLE_MAC_OS OR LINUX)
-        # Set a common RUNTIME_OUTPUT_DIR and LIBRARY_OUTPUT_DIR for all targets,
-        # so that INSTALL RPATH is functional in build directory as well.
-        # BUILD_WITH_INSTALL_RPATH is necessary for working code signing.
-        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY $<1:${KTX_BUILD_DIR}/$<CONFIG>>)
+    if(APPLE OR LINUX)
+        # Use a common RUNTIME_OUTPUT_DIR and LIBRARY_OUTPUT_DIR for all
+        # targets so that the INSTALL RPATH we need for installed binaries
+        # is functional in the build directory as well. INSTALL_RPATH cannot
+        # be altered during install because that would break code signing
+        # which happens after building. Therefore BUILD_WITH_INSTALL_RPATH
+        # is necessary for working code signing. Although Linux code is not
+        # yet being signed, make it symmetrical with macOS.
         set(CMAKE_LIBRARY_OUTPUT_DIRECTORY $<1:${KTX_BUILD_DIR}/$<CONFIG>>)
+        set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+
+        # Notes about install names, rpaths and code signing
+        # --------------------------------------------------
+        # Changing the install name of a library by setting INSTALL_NAME_DIR
+        # on a library target will invalidate the signature as it causes
+        # cmake to run `install_name_tool` after building and signing. The
+        # default install name is the library target's name prefixed by
+        # `@rpath/`. With this, `dyld` will load the library provided it is
+        # in one of the directories specified by a program's INSTALL_RPATH
+        # or is in the directory part of a full-path name passed to `dlopen`.
+        #
+        # A bad signature in either executable or shared library is
+        # indicated by the executable exiting with "Killed: 9".
+    endif()
 endif()
 
 set(KTX_BASISU_INCLUDE_DIRS
@@ -503,9 +547,6 @@ macro(common_libktx_settings target enable_write library_type)
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
         XCODE_ATTRIBUTE_ENABLE_HARDENED_RUNTIME "YES"
-        CXX_STANDARD 11
-        CXX_STANDARD_REQUIRED YES
-
     )
     if(APPLE_LOCKED_OS)
         set_target_properties(${target} PROPERTIES
@@ -609,6 +650,21 @@ macro(common_libktx_settings target enable_write library_type)
         PRIVATE
             # Only set dllexport when building a shared library.
             $<$<STREQUAL:${library_type},SHARED>:KTX_API=__declspec\(dllexport\)>
+            # Code compiled with the versions shown defaults to a constexpr
+            # std::mutex constructor and requires a mscvp140.dll of at least
+            # version 14.40.33810.00 otherwise code creating a mutex
+            # crashes mysteriously. Since many JVM installations bundle 
+            # their own version of the VC++ redistributables chances are
+            # high they will not have a modern enough version so JNI modules
+            # linked with libktx will crash when multiple threads are used,
+            # as they are in the BasisU and ASTC encoders.
+            #
+            # To avoid this set a define to prevent the compiler using
+            # constexpr mutex constructors. Remove this eventually after
+            # in-use JVM installations have at least this VC runtime. Remove
+            # also from ASTCENC_LIB_TARGET settings around line 1169.
+            $<$<AND:${is_msvccl},$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,19.40.33811>>:_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR>
+            $<$<AND:${is_clangcl},$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,17.0.3>>:_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR>
         PUBLIC # only for basisu_c_binding.
             BASISU_NO_ITERATOR_DEBUG_LEVEL
         )
@@ -727,8 +783,6 @@ macro(common_libktx_settings target enable_write library_type)
             ${target}
         PRIVATE
             lib/basis_encode.cpp
-            lib/astc_encode.cpp
-            ${BASISU_ENCODER_C_SRC}
             ${BASISU_ENCODER_CXX_SRC}
             lib/writer1.c
             lib/writer2.c
@@ -802,13 +856,33 @@ PRIVATE
     BASISD_SUPPORT_KTX2=0
 )
 
+# helper function to append COMPILE_OPTIONS to source file properties
+# !! if SRCFILES is a list, remember to quote it                              !!
+# !! like add_source_file_compile_options("${MY_SRC_LIST}"  "-Wall")          !!
+# !! or add_source_file_compile_options("dir/foo.cpp;dir/bar.cpp"  "-Wextra") !!
+function(add_source_file_compile_options SRCFILES OPTIONS)
+    foreach(src_file ${SRCFILES})
+        get_source_file_property(cur_options
+            "${src_file}"
+            COMPILE_OPTIONS
+        )
+        if(cur_options)
+            set_source_files_properties(
+                "${src_file}"
+                PROPERTIES COMPILE_OPTIONS "${cur_options};${OPTIONS}"
+            )
+        else() # if cur_options were undefined or empty ("")
+            set_source_files_properties(
+                "${src_file}"
+                PROPERTIES COMPILE_OPTIONS "${OPTIONS}"
+            )
+        endif()
+    endforeach()
+endfunction()
+
 # Turn off these warnings until Rich fixes the occurences.
 # It it not clear to me if generator expressions can be used here
 # hence the long-winded way.
-#message(STATUS
-#        "CMAKE_CXX_COMPILER_ID = ${CMAKE_CXX_COMPILER_ID} "
-#        "CMAKE_CXX_COMPILER_VERSION = ${CMAKE_CXX_COMPILER_VERSION}"
-#)
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
 # Currently no need to disable any warnings in basisu code. Rich fixed them.
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -816,26 +890,22 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # It's too much work to discriminate which files need which warnings
         # disabled.
         ${BASISU_ENCODER_CXX_SRC}
-        PROPERTIES COMPILE_OPTIONS "-Wno-sign-compare;-Wno-unused-variable;-Wno-class-memaccess;-Wno-misleading-indentation;-Wno-extra;-Wno-deprecated-copy;-Wno-parentheses;-Wno-strict-aliasing"
+        PROPERTIES COMPILE_OPTIONS "-fno-strict-aliasing;-Wno-sign-compare;-Wno-unused-variable;-Wno-class-memaccess;-Wno-misleading-indentation;-Wno-extra;-Wno-deprecated-copy;-Wno-parentheses"
     )
     set_source_files_properties(
         external/basisu/transcoder/basisu_transcoder.cpp
-        PROPERTIES COMPILE_OPTIONS "-Wno-sign-compare;-Wno-unused-function;-Wno-unused-variable;-Wno-class-memaccess;-Wno-maybe-uninitialized"
+        PROPERTIES COMPILE_OPTIONS "-fno-strict-aliasing;-Wno-sign-compare;-Wno-unused-function;-Wno-unused-variable;-Wno-class-memaccess;-Wno-maybe-uninitialized"
     )
     if (${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER_EQUAL "11")
         if (${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS "12" )
-        # Version 11 raises several stringop-overflow warnings in some
-        # very hard to decipher code. They appear to be bogus based on
-        # the facts that we have never seen a crash and version 12 no
-        # longer raises the warnings.
-        get_source_file_property(cur_options
-            external/basisu/encoder/basisu_comp.cpp
-            COMPILE_OPTIONS
-        )
-        set_source_files_properties(
-            external/basisu/encoder/basisu_comp.cpp
-            PROPERTIES COMPILE_OPTIONS "${cur_options};-Wno-stringop-overflow"
-        )
+            # Version 11 raises several stringop-overflow warnings in some
+            # very hard to decipher code. They appear to be bogus based on
+            # the facts that we have never seen a crash and version 12 no
+            # longer raises the warnings.
+            add_source_file_compile_options(
+                external/basisu/encoder/basisu_comp.cpp
+                "-Wno-stringop-overflow"
+            )
         endif()
     endif()
     if (${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER_EQUAL "12.0")
@@ -843,9 +913,16 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # There seems no way for the index calculated by the code at
         # line 326, where the error is raised, to be > the array length.
         # Also we have never seen any crashes.
-        set_source_files_properties(
+        add_source_file_compile_options(
             external/basisu/encoder/basisu_uastc_enc.cpp
-            PROPERTIES COMPILE_OPTIONS "-Wno-stringop-overflow"
+            "-Wno-stringop-overflow"
+        )
+    endif()
+    if (${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER_EQUAL "14.0")
+        # Version 14 raises stringop-overflow on these files.
+        add_source_file_compile_options(
+            "external/basisu/transcoder/basisu_transcoder.cpp;external/basisu/encoder/basisu_bc7enc.cpp"
+            "-Wno-stringop-overflow"
         )
     endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -868,25 +945,31 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set( clang_version ${CMAKE_CXX_COMPILER_VERSION} )
     endif()
     # BEWARE: set_source_files_properties is not additive; it replaces.
+    set_source_files_properties(
+        ${BASISU_ENCODER_CXX_SRC}
+        PROPERTIES COMPILE_OPTIONS "-fno-strict-aliasing"
+    )
+    set_source_files_properties(
+        external/basisu/transcoder/basisu_transcoder.cpp
+        PROPERTIES COMPILE_OPTIONS "-fno-strict-aliasing"
+    )
     if (${clang_version} VERSION_GREATER_EQUAL "12.0.0")
-        set_source_files_properties( external/basisu/encoder/basisu_kernels_sse.cpp
-            PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter;-Wno-deprecated-copy;-Wno-uninitialized-const-reference"
+        add_source_file_compile_options( external/basisu/encoder/basisu_kernels_sse.cpp
+            "-Wno-unused-parameter;-Wno-deprecated-copy;-Wno-uninitialized-const-reference"
         )
     else()
-        set_source_files_properties( external/basisu/encoder/basisu_kernels_sse.cpp
-            PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter"
+        add_source_file_compile_options( external/basisu/encoder/basisu_kernels_sse.cpp
+            "-Wno-unused-parameter"
         )
     endif()
     if (${clang_version} VERSION_GREATER_EQUAL "14.0")
-        # These are for Emscripten which is ahead of xcode in its clang
-        # version. Also future proofing for when xcode catches up.
-        set_source_files_properties(
-            ${BASISU_ENCODER_CXX_SRC}
-            PROPERTIES COMPILE_OPTIONS "-Wno-sign-compare;-Wno-unused-variable;-Wno-unused-parameter;-Wno-deprecated-copy-with-user-provided-copy"
+        add_source_file_compile_options(
+            "${BASISU_ENCODER_CXX_SRC}"
+            "-Wno-sign-compare;-Wno-unused-variable;-Wno-unused-parameter;-Wno-deprecated-copy-with-user-provided-copy"
         )
-        set_source_files_properties(
+        add_source_file_compile_options(
             external/basisu/transcoder/basisu_transcoder.cpp
-            PROPERTIES COMPILE_OPTIONS "-Wno-sign-compare;-Wno-unused-function;-Wno-unused-variable"
+            "-Wno-sign-compare;-Wno-unused-function;-Wno-unused-variable"
         )
         set_source_files_properties(
             external/basisu/zstd/zstd.c
@@ -899,7 +982,7 @@ endif()
 
 # Retrieve the final set of properties for use by the transcodetests.
 # We do this because the CMake feature that would allow the transcodetests
-# target to retrieve these from the ktx target are not available until
+# target to retrieve these from the ktx target is not available until
 # v18 and we still need to work with v16 in the Emscripten Docker image.
 get_source_file_property(transcoder_options
     external/basisu/transcoder/basisu_transcoder.cpp
@@ -909,21 +992,45 @@ get_source_file_property(zstd_options external/basisu/zstd/zstd.c COMPILE_OPTION
 
 if(EMSCRIPTEN)
     set(
-        KTX_EMC_LINK_FLAGS
+        KTX_EM_COMMON_LINK_FLAGS
         --bind
         "SHELL:-s MODULARIZE=1"
+        "SHELL:-s EXPORTED_RUNTIME_METHODS=[\'GL,HEAP8\']"
+        "SHELL:-s GL_PREINITIALIZED_CONTEXT=1"
     )
 
-    add_executable( ktx_js interface/js_binding/ktx_wrapper.cpp )
-    target_link_libraries( ktx_js ktx_read )
-    target_include_directories( ktx_js PRIVATE $<TARGET_PROPERTY:ktx_read,INTERFACE_INCLUDE_DIRECTORIES> )
+    set(
+        KTX_EM_COMMON_KTX_LINK_FLAGS
+        --pre-js ${CMAKE_CURRENT_SOURCE_DIR}/interface/js_binding/class_compat.js
+        --extern-post-js ${CMAKE_CURRENT_SOURCE_DIR}/interface/js_binding/module_create_compat.js
+        ${KTX_EM_COMMON_LINK_FLAGS}
+    )
+
+    set(
+        KTX_JS_COMMON_SOURCE
+        interface/js_binding/ktx_wrapper.cpp
+        interface/js_binding/class_compat.js
+        interface/js_binding/module_create_compat.js
+    )
+
+    add_executable( ktx_js
+        ${KTX_JS_COMMON_SOURCE}
+        interface/js_binding/vk_format.inl
+    )
+    target_compile_definitions(ktx_js PUBLIC KTX_FEATURE_WRITE)
+    target_link_libraries( ktx_js ktx )
+    target_include_directories(
+        ktx_js
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/other_include
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib
+        $<TARGET_PROPERTY:ktx,INTERFACE_INCLUDE_DIRECTORIES>
+    )
     target_link_options(
         ktx_js
     PUBLIC
-        ${KTX_EMC_LINK_FLAGS}
-        "SHELL:-s EXPORT_NAME=LIBKTX"
-        "SHELL:-s EXPORTED_RUNTIME_METHODS=[\'GL\']"
-        "SHELL:-s GL_PREINITIALIZED_CONTEXT=1"
+        ${KTX_EM_COMMON_KTX_LINK_FLAGS}
+        "SHELL:-s EXPORT_NAME=createKtxModule"
     )
     set_target_properties( ktx_js PROPERTIES OUTPUT_NAME "libktx")
 
@@ -945,6 +1052,43 @@ if(EMSCRIPTEN)
         COMPONENT ktx_js
     )
 
+    add_executable( ktx_js_read
+        ${KTX_JS_COMMON_SOURCE}
+    )
+    target_link_libraries( ktx_js_read ktx_read )
+    target_include_directories(
+        ktx_js_read
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/other_include
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib
+        $<TARGET_PROPERTY:ktx_read,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_link_options(
+        ktx_js_read
+    PUBLIC
+        ${KTX_EM_COMMON_KTX_LINK_FLAGS}
+        "SHELL:-s EXPORT_NAME=createKtxReadModule"
+    )
+    set_target_properties( ktx_js_read PROPERTIES OUTPUT_NAME "libktx_read")
+
+    add_custom_command(
+        TARGET ktx_js_read
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE_DIR:ktx_js_read>/$<TARGET_FILE_PREFIX:ktx_js_read>$<TARGET_FILE_BASE_NAME:ktx_js_read>.js" "${PROJECT_SOURCE_DIR}/tests/webgl"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE_DIR:ktx_js_read>/$<TARGET_FILE_PREFIX:ktx_js_read>$<TARGET_FILE_BASE_NAME:ktx_js_read>.wasm" "${PROJECT_SOURCE_DIR}/tests/webgl"
+        COMMENT "Copy libktx_read.js and libktx_read.wasm to tests/webgl"
+    )
+
+    install(TARGETS ktx_js_read
+        RUNTIME
+            DESTINATION .
+            COMPONENT ktx_js_read
+    )
+    install(FILES ${CMAKE_BINARY_DIR}/libktx_read.wasm
+        DESTINATION .
+        COMPONENT ktx_js_read
+    )
+
     add_executable( msc_basis_transcoder_js interface/js_binding/transcoder_wrapper.cpp )
     target_link_libraries( msc_basis_transcoder_js ktx_read )
     target_include_directories( msc_basis_transcoder_js
@@ -963,7 +1107,7 @@ if(EMSCRIPTEN)
     target_link_options(
         msc_basis_transcoder_js
     PUBLIC
-        ${KTX_EMC_LINK_FLAGS}
+        ${KTX_EM_COMMON_LINK_FLAGS}
         "SHELL:-s EXPORT_NAME=MSC_TRANSCODER"
         # Re-use ktx's link options
         $<TARGET_PROPERTY:ktx_read,INTERFACE_LINK_OPTIONS>
@@ -1004,6 +1148,11 @@ target_include_directories(
 PUBLIC
     utils
 )
+target_compile_features(
+    objUtil
+PUBLIC
+    cxx_std_11
+)
 
 # In C++ apps that use statically linked Libraries all compilatiom units must
 # be compiled with matching symbol visibility settings to avoid warnings from
@@ -1024,7 +1173,7 @@ set (STATIC_APP_LIB_SYMBOL_VISIBILITY hidden)
 set_target_properties(objUtil PROPERTIES
     CXX_VISIBILITY_PRESET ${STATIC_APP_LIB_SYMBOL_VISIBILITY}
 )
-if(KTX_FEATURE_STATIC_LIBRARY AND
+if(NOT BUILD_SHARED_LIBS AND
    (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
     set_source_files_properties(
         lib/astc_encode.cpp
@@ -1034,76 +1183,140 @@ endif()
 
 add_subdirectory(interface/basisu_c_binding)
 
-# Only one architecture is supported at once, if neither ASTCENC_ISA_SSE41
-# nor ASTCENC_ISA_SSE2 are defined, ASTCENC_ISA_AVX2 is chosen. If
-# ASTCENC_ISA_AVX2 fails to compile user must chose other x86 options.
-# On arm based systems ASTCENC_ISA_NEON is the default. If we detect
-# the user is doing a universal build then SIMD is disabled.
+####################################################
+# ASTC Encoder.
+####################################################
 
-list(FIND CMAKE_OSX_ARCHITECTURES "$(ARCHS_STANDARD)" ASTCENC_BUILD_UNIVERSAL)
-list(LENGTH CMAKE_OSX_ARCHITECTURES ARCHITECTURE_COUNT)
+# Determine most of the ASTC-related settings automatically.
 
-if(${ASTCENC_BUILD_UNIVERSAL} EQUAL -1 AND ARCHITECTURE_COUNT LESS_EQUAL 1)
-    if (${ASTCENC_ISA_NONE})
+# On Linux and Windows only one architecture is supported at once. On
+# macOS simultaneous multiple architectures are supported by the ASTC
+# encoder but not by the BasisU encoder. The latter supports only SSE
+# SIMD that is enabled by compile time defines which makes it not amenable
+# to a standard Xcode universal binary build. To ensure BASISU_SUPPORT_SSE
+# is disabled when building for multiple architectures use only the
+# value of CMAKE_OSX_ARCHITECTURES to decide if a universal build
+# has been requested. Do not expose the astc-encoder's
+# ASTCENC_UNIVERSAL_BUILD configuration option.
+
+set(universal_build OFF)
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
+    # Check CMAKE_OSX_ARCHITECTURES for multiple architectures.
+    list(FIND CMAKE_OSX_ARCHITECTURES "$(ARCHS_STANDARD)" archs_standard)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES architecture_count)
+    if(NOT ${archs_standard} EQUAL -1 OR architecture_count GREATER 1)
+        set(universal_build ON)
+    endif()
+    # Set ordinary variable to override astc-encoder option's ON default
+    # and hide the option.
+    set(ASTCENC_UNIVERSAL_BUILD ${universal_build})
+endif()
+
+# If we detect the user is doing a universal build defer to astc-encoder
+# to pick the architectures. If a universal build has not been requested,
+# present options to the user to turn off SIMD and, if running on x86_64
+# to choose which SIMD ISA to use. On arm64 always use Neon. On unknown
+# CPUs use None.
+#
+# On x86_64, if neither ASTCENC_ISA_SSE41 nor ASTCENC_ISA_SSE2 are defined,
+# choose ASTCENC_ISA_AVX2. If ASTCENC_ISA_AVX2 fails to compile user must
+# choose another x86_64 option.
+
+if(NOT ${universal_build})
+    set(ASTCENC_ISA_NATIVE OFF)
+    set(ASTCENC_ISA_NEON OFF)
+    if(NOT CPU_ARCHITECTURE STREQUAL x86_64)
+        set(ASTCENC_ISA_AVX2 OFF)
+        set(ASTCENC_ISA_SSE41 OFF)
+        set(ASTCENC_ISA_SSE2 OFF)
+    endif()
+
+    # "" in the CACHE sets causes use of the existing documentation string.
+    if(${ASTCENC_ISA_NONE})
         set(ASTCENC_LIB_TARGET astcenc-none-static)
+        if(CPU_ARCHITECTURE STREQUAL x86_64)
+            set(ASTCENC_ISA_AVX2 OFF CACHE BOOL "" FORCE)
+            set(ASTCENC_ISA_SSE41 OFF CACHE BOOL "" FORCE)
+            set(ASTCENC_ISA_SSE2 OFF CACHE BOOL "" FORCE)
+        endif()
     else()
-        if(CPU_ARCHITECTURE STREQUAL x86_64 OR CPU_ARCHITECTURE STREQUAL x86)
+        if(CPU_ARCHITECTURE STREQUAL x86_64)
             if (${ASTCENC_ISA_SSE41})
                 set(ASTCENC_LIB_TARGET astcenc-sse4.1-static)
+                set(ASTCENC_ISA_AVX2 OFF CACHE BOOL "" FORCE)
+                set(ASTCENC_ISA_SSE2 OFF CACHE BOOL "" FORCE)
             elseif (${ASTCENC_ISA_SSE2})
                 set(ASTCENC_LIB_TARGET astcenc-sse2-static)
+                set(ASTCENC_ISA_AVX2 OFF CACHE BOOL "" FORCE)
+                set(ASTCENC_ISA_SSE41 OFF CACHE BOOL "" FORCE)
             else()
-                set(ASTCENC_ISA_AVX2 ON)
                 set(ASTCENC_LIB_TARGET astcenc-avx2-static)
-            endif()
-            if(CPU_ARCHITECTURE STREQUAL x86)
-                set(ASTCENC_ISA_NONE ON)
-                set(ASTCENC_ISA_AVX2 OFF)
-                set(ASTCENC_POPCNT 0)
-                set(ASTCENC_LIB_TARGET astcenc-none-static)
+                set(ASTCENC_ISA_AVX2 ON CACHE BOOL "" FORCE)
+                set(ASTCENC_ISA_SSE41 OFF CACHE BOOL "" FORCE)
+                set(ASTCENC_ISA_SSE2 OFF CACHE BOOL "" FORCE)
             endif()
         elseif(CPU_ARCHITECTURE STREQUAL armv8 OR CPU_ARCHITECTURE STREQUAL arm64)
             set(ASTCENC_LIB_TARGET astcenc-neon-static)
             set(ASTCENC_ISA_NEON ON)
+            set(ASTCENC_ISA_NONE OFF CACHE BOOL "" FORCE)
         else()
             message(STATUS "Unsupported ISA for ASTC on ${CPU_ARCHITECTURE} arch, using ASTCENC_ISA_NONE.")
+            set(ASTCENC_ISA_NONE ON CACHE BOOL "" FORCE)
             set(ASTCENC_LIB_TARGET astcenc-none-static)
-            set(ASTCENC_ISA_NONE ON)
         endif()
     endif()
-else()
-    set(ASTCENC_LIB_TARGET astcenc-static)
 endif()
 
-# astcenc
+# setting ASTCENC_DECOMPRESSOR to ON breaks the build, so force it to OFF
+# and hide it from cmake-gui (by using type INTERNAL)
+set(ASTCENC_DECOMPRESSOR OFF CACHE INTERNAL "")
 set(ASTCENC_CLI OFF) # Only build as library not the CLI astcencoder
+# Force static build for astc-encoder
+set(BUILD_SHARED_LIBS OFF)
 add_subdirectory(external/astc-encoder)
+set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_RESET})
 set_property(TARGET ${ASTCENC_LIB_TARGET} PROPERTY POSITION_INDEPENDENT_CODE ON)
+target_compile_definitions(
+    ${ASTCENC_LIB_TARGET}
+PRIVATE
+    # ASTC encoder uses std::mutex. For more info. see comment about
+    # same setting in libktx starting about line 633. To be eventually
+    # removed as noted in that comment.
+    $<$<AND:${is_msvccl},$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,19.40.33811>>:_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR>
+    $<$<AND:${is_clangcl},$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,17.0.3>>:_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR>
+)
 
-if(KTX_FEATURE_STATIC_LIBRARY AND APPLE)
-    # Make a single static library to simplify linking.
-    add_dependencies(ktx ${ASTCENC_LIB_TARGET})
-    add_custom_command( TARGET ktx
-        POST_BUILD
-        COMMAND libtool -static -o $<TARGET_FILE:ktx> $<TARGET_FILE:ktx> $<TARGET_FILE:${ASTCENC_LIB_TARGET}>
-    )
+macro(set_astc_dependencies target)
+    if(NOT BUILD_SHARED_LIBS AND APPLE)
+        # Make a single static library to simplify linking.
+        add_dependencies(${target} ${ASTCENC_LIB_TARGET})
+        add_custom_command( TARGET ${target}
+            POST_BUILD
+            COMMAND libtool -static -o $<TARGET_FILE:${target}> $<TARGET_FILE:ktx> $<TARGET_FILE:${ASTCENC_LIB_TARGET}>
+        )
 
-    # Don't know libtool equivalent on Windows or Emscripten. Applications
-    # will have to link with  both ktx and ${ASTCENC_LIB_TARGET}. Static libs
-    # are unlikely to be used on Windows so not a problem there. For Emscripten
-    # everything is built into the JS module so not an issue there either.
-else()
-    target_link_libraries(ktx PRIVATE ${ASTCENC_LIB_TARGET})
-endif()
+        # Don't know libtool equivalent on Windows or Emscripten. Applications
+        # will have to link with  both ktx and ${ASTCENC_LIB_TARGET}. Static libs
+        # are unlikely to be used on Windows so not a problem there. For Emscripten
+        # everything is built into the JS module so not an issue there either.
+    else()
+        target_link_libraries(${target} PRIVATE ${ASTCENC_LIB_TARGET})
+    endif()
+endmacro(set_astc_dependencies)
+set_astc_dependencies(ktx)
+set_astc_dependencies(ktx_read)
 
 # Other external projects
 # `NOT TARGET`s here are a precaution. They would only be exercised if
 # this CMakeLists is included in another project which is unlikely
 # except for building the ktx library.
 if((KTX_FEATURE_TOOLS OR KTX_FEATURE_TESTS) AND NOT TARGET fmt::fmt)
+    # Always build fmt static
+    set(BUILD_SHARED_LIBS OFF)
     set(FMT_INSTALL OFF)
     set(FMT_SYSTEM_HEADERS ON)
     add_subdirectory(external/fmt)
+    set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_RESET})
 endif()
 if(KTX_FEATURE_TOOLS AND NOT TARGET cxxopts::cxxopts)
     add_subdirectory(external/cxxopts)
@@ -1123,7 +1336,7 @@ if(KTX_FEATURE_DOC)
 endif()
 
 set(KTX_INSTALL_TARGETS ktx)
-if(KTX_FEATURE_STATIC_LIBRARY AND NOT APPLE)
+if(NOT BUILD_SHARED_LIBS AND NOT APPLE)
     list(APPEND KTX_INSTALL_TARGETS ${ASTCENC_LIB_TARGET})
 endif()
 
@@ -1339,6 +1552,7 @@ elseif(WIN32)
 elseif(EMSCRIPTEN)
     set(CPACK_GENERATOR ZIP)
     set(CPACK_ARCHIVE_KTX_JS_FILE_NAME "${CMAKE_PROJECT_NAME}-${KTX_VERSION_FULL}-Web-libktx")
+    set(CPACK_ARCHIVE_KTX_JS_READ_FILE_NAME "${CMAKE_PROJECT_NAME}-${KTX_VERSION_FULL}-Web-libktx_read")
     set(CPACK_ARCHIVE_MSC_BASIS_TRANSCODER_JS_FILE_NAME "${CMAKE_PROJECT_NAME}-${KTX_VERSION_FULL}-Web-msc_basis_transcoder")
 
     set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
@@ -1390,6 +1604,7 @@ cpack_add_component_group(LoadTestApps
 if(EMSCRIPTEN)
     set(CPACK_COMPONENTS_ALL
         ktx_js
+        ktx_js_read
         msc_basis_transcoder_js
     )
 else()

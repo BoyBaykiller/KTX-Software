@@ -7,11 +7,10 @@ add_executable(ktxdiff
         ktxdiff_main.cpp
 )
 
-set_target_properties(
+target_compile_features(
     ktxdiff
-    PROPERTIES
-        CXX_STANDARD 17
-        CXX_STANDARD_REQUIRED YES
+PUBLIC
+    cxx_std_17
 )
 
 target_include_directories(
@@ -44,3 +43,5 @@ target_compile_definitions(
 PRIVATE
     $<TARGET_PROPERTY:ktx,INTERFACE_COMPILE_DEFINITIONS>
 )
+
+set_test_properties(ktxdiff)

@@ -8,12 +8,15 @@
 
 /**
  * @internal
- * @file LoadTestsGL3.cpp
+ * @file
  * @~English
  *
  * @brief Instantiate GLLoadTests app with set of tests for OpenGL 3.3+ and
  *        OpenGL ES 3.x
  */
+
+#include <string>
+#include <regex>
 
 #include "GLLoadTests.h"
 #include "EncodeTexture.h"
@@ -29,7 +32,7 @@
 #endif
 
 LoadTestSample*
-GLLoadTests::showFile(std::string& filename)
+GLLoadTests::showFile(const std::string& filename)
 {
     KTX_error_code ktxresult;
     ktxTexture* kTexture;
@@ -71,7 +74,9 @@ GLLoadTests::showFile(std::string& filename)
         createViewer = DrawTexture::create;
     }
     ktxTexture_Destroy(kTexture);
-    std::string args = "--external " + filename;
+
+    // Escape any spaces in filename.
+    std::string args = "--external " + std::regex_replace( filename, std::regex(" "), "\\ " );
     pViewer = createViewer(w_width, w_height, args.c_str(), sBasePath);
     return pViewer;
 }

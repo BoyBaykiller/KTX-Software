@@ -379,8 +379,8 @@ struct DFD {
         "DFD block #{} versionNumber in basic DFD block is {} but it must be KHR_DF_VERSIONNUMBER_1_3."
     };
     static constexpr IssueError BasicInvalidTransferFunction{
-        6012, "Invalid transferFunction in basic DFD block. It must be either KHR_DF_TRANSFER_LINEAR or KHR_DF_TRANSFER_SRGB.",
-        "DFD block #{} transferFunction in basic DFD block is {} but it must be either KHR_DF_TRANSFER_LINEAR or KHR_DF_TRANSFER_SRGB."
+        6012, "Invalid transferFunction in basic DFD block. It is not a value known to the KTX specification.",
+        "DFD block #{} transferFunction in basic DFD block is {} but values must be between 0 (KHR_DF_TRANSFER_UNSPECIFIED) and 18 (KHR_DF_TRANSFER_ADOBERGB)."
     };
     static constexpr IssueError BasicSRGBMismatch{
         6013, "Invalid transferFunction in basic DFD block. For an sRGB VkFormat it must be KHR_DF_TRANSFER_SRGB.",
@@ -418,10 +418,6 @@ struct DFD {
         6021, "Invalid bytesPlanes in basic DFD block. The values do not match the expected values.",
         "DFD block #{} bytesPlanes in basic DFD block are {} {} {} {} {} {} {} {} but for {} textures these must be {} {} {} {} {} {} {} {}."
     };
-    static constexpr IssueError BytesPlanesNotUnsized{
-        6022, "Invalid bytesPlanes in basic DFD block. BytesPlanes must be 0 for supercompressed textures.",
-        "DFD block #{} bytesPlanes in basic DFD block are {} {} {} {} {} {} {} {} but for {} supercompressed textures these must be zeros."
-    };
     static constexpr IssueError BytesPlane0Zero{
         6023, "Invalid bytesPlane0 in basic DFD block. BytesPlane0 must be non-zero for non-supercompressed VK_FORMAT_UNDEFINED textures.",
         "DFD block #{} bytesPlane0 in basic DFD block is {} but it must be non-zero for non-supercompressed VK_FORMAT_UNDEFINED textures."
@@ -446,9 +442,13 @@ struct DFD {
         6028, "Invalid sample in basic DFD block. The samples must match the expected samples of the VkFormat.",
         "DFD block #{} sample #{} {} in basic DFD block is {} but the expected value is {} for {}."
     };
-    static constexpr IssueWarning TooManySample{
-        6029, "Too many BDFD sample. The number of BDFD samples exceeds the validator limit.",
+    static constexpr IssueWarning TooManySamples{
+        6029, "Too many BDFD samples. The number of BDFD samples exceeds the validator limit.",
         "DFD block #{} sample count in basic DFD block is {} which exceeds the validator limit of {}. Skipping validation of the last {} sample(s) ({} byte(s))."
+    };
+    static constexpr IssueWarning BytesPlanesUnsized{
+        6030, "Deprecated unsized bytesPlanes in basic DFD block. Since specification 2.0.4 bytesPlanes must be sized (non-zero) for supercompressed textures.",
+        "DFD block #{} bytesPlanes0 in basic DFD block is {} but for {} supercompressed textures, since specification 2.0.4, it must be non-zero."
     };
 
     // 61xx - Basic Data Format Descriptor Block sample related issues:

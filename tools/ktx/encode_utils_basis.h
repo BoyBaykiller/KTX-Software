@@ -31,14 +31,15 @@ enum class BasisCodec {
         Supercompress the image data with transcodable ETC1S / BasisLZ.
         RED images will become RGB with RED in each component (RRR). RG
         images will have R in the RGB part and G in the alpha part of
-        the compressed texture (RRRG). When set, the following BasisLZ-related
-        options become valid, otherwise they are ignored.
+        the compressed texture (RRRG). When set, the @e basis-lz options
+        become valid.
     </dd>
     <dt>
         uastc:
     </dt>
     <dd>
-        Create a texture in high-quality transcodable UASTC format.
+        Create a texture in high-quality transcodable UASTC format. When set
+        the @e uastc options become valid.
     </dd>
 </dl>
 //! [command options_basis_encoders]
@@ -54,8 +55,8 @@ enum class BasisCodec {
     <dl>
         <dt>\--clevel &lt;level&gt;</dt>
              <dd>ETC1S / BasisLZ compression level, an encoding speed vs.
-             quality tradeoff. Range is [0,5], default is 1. Higher values
-             are slower but give higher quality.</dd>
+             quality tradeoff. Range is [0,6], default is 1. Higher values
+             are slower but give higher quality. Use @b \--qlevel first.</dd>
         <dt>\--qlevel &lt;level&gt;</dt>
              <dd>ETC1S / BasisLZ quality level. Range is [1,255]. Lower
              gives better compression/lower quality/faster. Higher gives
@@ -234,7 +235,7 @@ struct OptionsEncodeBasis : public ktxBasisParams {
     void init(cxxopts::Options& opts) {
         opts.add_options("Encode BasisLZ")
             (kCLevel, "BasisLZ compression level, an encoding speed vs. quality level tradeoff. "
-                "Range is [0,5], default is 1. Higher values are slower but give higher quality.",
+                "Range is [0,6], default is 1. Higher values are slower but give higher quality.",
                 cxxopts::value<uint32_t>(), "<level>")
             (kQLevel, "BasisLZ quality level. Range is [1,255]. Lower gives better compression/lower "
                 "quality/faster. Higher gives less compression/higher quality/slower. --qlevel "
@@ -349,40 +350,26 @@ struct OptionsEncodeBasis : public ktxBasisParams {
     }
 
     void process(cxxopts::Options&, cxxopts::ParseResult& args, Reporter& report) {
+        std::string codec_option{"encode"};
+
         if (ENCODE_CMD) {
-            // "encode" command - required "codec" argument
-            codec = validateBasisCodec(args["codec"]);
-            switch (codec) {
-            case BasisCodec::NONE:
-                report.fatal(rc::INVALID_ARGUMENTS, "Missing codec argument.");
-                break;
+            codec_option = "codec";
+        }
 
-            case BasisCodec::BasisLZ:
-            case BasisCodec::UASTC:
-                codecName = to_lower_copy(args["codec"].as<std::string>());
-                break;
+        codec = validateBasisCodec(args[codec_option]);
+        switch (codec) {
+        case BasisCodec::NONE:
+            // Not specified
+            break;
 
-            default:
-                report.fatal_usage("Invalid encode codec: \"{}\".", args["codec"].as<std::string>());
-                break;
-            }
-        } else {
-            // "create" command - optional "encode" argument
-            codec = validateBasisCodec(args["encode"]);
-            switch (codec) {
-            case BasisCodec::NONE:
-                // Not specified
-                break;
+        case BasisCodec::BasisLZ:
+        case BasisCodec::UASTC:
+            codecName = to_lower_copy(args[codec_option].as<std::string>());
+            break;
 
-            case BasisCodec::BasisLZ:
-            case BasisCodec::UASTC:
-                codecName = to_lower_copy(args["encode"].as<std::string>());
-                break;
-
-            default:
-                report.fatal_usage("Invalid encode codec: \"{}\".", args["encode"].as<std::string>());
-                break;
-            }
+        default:
+            report.fatal_usage("Invalid encode codec: \"{}\".", args[codec_option].as<std::string>());
+            break;
         }
 
         if (codec == BasisCodec::UASTC) {
