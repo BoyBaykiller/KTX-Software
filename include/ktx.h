@@ -1153,6 +1153,11 @@ KTX_API ktx_bool_t KTX_APIENTRY
 ktxTexture2_NeedsTranscoding(ktxTexture2* This);
 
 KTX_API ktx_error_code_e KTX_APIENTRY
+ktxTexture2_SetImageFromMemory(ktxTexture2* This, ktx_uint32_t level,
+                               ktx_uint32_t layer, ktx_uint32_t faceSlice,
+                               const ktx_uint8_t* src, ktx_size_t srcSize);
+
+KTX_API ktx_error_code_e KTX_APIENTRY
 ktxTexture2_SetTransferFunction(ktxTexture2* This, khr_df_transfer_e tf);
 /* For backward compatibility. */
 KTX_API ktx_error_code_e KTX_APIENTRY
